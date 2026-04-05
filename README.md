@@ -12,16 +12,7 @@ Use the packaged build — no Python install needed.
 1. Open the repo on GitHub → **Releases** (right side) → pick the latest release.  
 2. Download the attached **`.zip`** (portable build), extract it, run **`RadarRift.exe`**.
 
-Direct link pattern (replace `YOUR_USER` with your GitHub username or org):
-
-`https://github.com/YOUR_USER/RadarRift/releases/latest`
-
----
-
-## Who can see the code?
-
-This project lives on **GitHub**. **Only people with access to the repository** (e.g. public repo, or private repo + invited collaborators) can browse or clone the source.  
-If the repo is **private**, release downloads are also limited to people GitHub allows to access that repo — to share builds widely without opening the code, host the zip on another file host and link it from here or from a separate public “downloads-only” repo.
+Latest release: **https://github.com/kagxyw/RadarRift/releases/latest**
 
 ---
 
@@ -31,8 +22,6 @@ Python **3.10+**, Windows.
 
 1. `pip install -r requirements.txt`
 2. `python main.py`
-
-Follow in-app / `startup_check` prompts for models and cache.
 
 ---
 
