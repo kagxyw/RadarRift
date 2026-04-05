@@ -1,0 +1,50 @@
+# PyInstaller
+dist/
+build/
+*.spec.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Large / generated ML assets
+*.pt
+*.pth
+*.onnx
+
+# App-local state (positions, roster)
+.radarrift_pos.json
+.radarrift_roster.json
+
+# Downloaded game cache (icons, matrices) — run rebuild_cache.py
+cache/
+
+# Spec temp copy
+cache_bundle_tmp/
+
+# Training / Ultralytics
+runs/
+wandb/
+
+# Local YOLO datasets & caches (optional; large)
+dataset/
+dataset_minimap/
+dataset_splash/
+dataset_champion/
+debug_crops/
+*.cache
+
+# Extra screenshots — RadarRift.spec bundles 060822 only
+*2026-03-08 193538.png
+*2026-03-08 194735.png
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

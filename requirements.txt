@@ -1,0 +1,23 @@
+# RadarRift — runtime (pip install -r requirements.txt)
+# Target: Windows + Python 3.10+ (PyQt6 overlay, DXGI capture).
+
+# Screen capture — dxcam first; mss fallback if dxcam is missing or fails init
+dxcam>=0.0.5
+mss>=9.0.1
+
+# Main window, overlay, region selectors
+PyQt6>=6.6.0
+
+# Arrays, OpenCV pipeline, PIL frames, custom alert sounds
+numpy>=1.26.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+pygame>=2.5.0
+
+# YOLOv11 ONNX in cache/ (minimap + splash)
+onnxruntime>=1.17.0
+
+# --- Optional: export .pt → .onnx (remake_onnx.py, onnx_model.export_*)
+# Pulls PyTorch; not needed if you only run with existing .onnx files.
+#   pip install ultralytics
+# ultralytics>=8.3.0
