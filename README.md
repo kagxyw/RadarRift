@@ -16,6 +16,13 @@ Latest release: **https://github.com/kagxyw/RadarRift/releases/latest**
 
 ---
 
+## Who can see the code?
+
+**GitHub** controls this: **public** repo → anyone can browse source; **private** repo → only people you invite.  
+On a **private** repo, **Releases** are also restricted to those users. To share a build publicly without opening the code, use a separate public “downloads” repo or another file host and link it here.
+
+---
+
 ## Run from source *(contributors / devs)*
 
 Python **3.10+**, Windows.
