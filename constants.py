@@ -13,7 +13,7 @@ else:
 
 def minimap_size(scale: float, screen_width: int) -> int:
     """Approximate LoL minimap edge length (px) from MinimapScale and screen width."""
-    return int(screen_width * (0.0703 + 0.0243 * scale))
+    return int(screen_width * (0.0703 + 0.0243 * scale) * 1.5)
 
 
 # ── Catppuccin-Mocha colour palette ───────────────────────────────────────────

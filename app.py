@@ -230,7 +230,9 @@ class _RegionSelectorDlg(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        screen    = QApplication.primaryScreen().geometry()
+        _scr      = QApplication.primaryScreen()
+        screen    = _scr.geometry()
+        self._dpr = _scr.devicePixelRatio()
         self._sw  = screen.width()
         self._sh  = screen.height()
         self.setGeometry(screen)
@@ -308,7 +310,8 @@ class _RegionSelectorDlg(QWidget):
         self._slider.valueChanged.connect(self._on_size)
         pl.addWidget(self._slider)
 
-        self._size_lbl = QLabel(f"{self._size} × {self._size} px")
+        _phys0 = round(self._size * self._dpr)
+        self._size_lbl = QLabel(f"{_phys0} × {_phys0} px")
         self._size_lbl.setStyleSheet(
             "color:#00ff88; font-weight:bold; font-size:12px;")
         self._size_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -339,17 +342,16 @@ class _RegionSelectorDlg(QWidget):
 
     def _on_size(self, val: int) -> None:
         self._size = val
-        self._size_lbl.setText(f"{val} × {val} px")
+        phys = round(val * self._dpr)
+        self._size_lbl.setText(f"{phys} × {phys} px")
         self.update()
 
     def _confirm(self) -> None:
         sz  = self._size
         x   = (self._sw - sz - 8) if self._corner == "right" else 8
         y   = self._sh - sz - 8
-        # Qt geometry is in logical pixels; dxcam/mss need physical pixels
-        dpr = QApplication.primaryScreen().devicePixelRatio()
-        self.result = (round(x * dpr), round(y * dpr),
-                       round(sz * dpr), round(sz * dpr))
+        self.result = (round(x * self._dpr), round(y * self._dpr),
+                       round(sz * self._dpr), round(sz * self._dpr))
         self.close()
 
     def paintEvent(self, _event) -> None:
@@ -383,7 +385,9 @@ class _FreeRegionSelectorDlg(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        screen   = QApplication.primaryScreen().geometry()
+        _scr     = QApplication.primaryScreen()
+        screen   = _scr.geometry()
+        self._dpr = _scr.devicePixelRatio()
         self._sw = screen.width()
         self._sh = screen.height()
         self.setGeometry(screen)
@@ -478,10 +482,8 @@ class _FreeRegionSelectorDlg(QWidget):
             y = int(min(self._y0, self._y1))
             w = int(abs(self._x1 - self._x0))
             h = int(abs(self._y1 - self._y0))
-            # Qt geometry is in logical pixels; dxcam/mss need physical pixels
-            dpr = QApplication.primaryScreen().devicePixelRatio()
-            self.result = (round(x * dpr), round(y * dpr),
-                           round(w * dpr), round(h * dpr))
+            self.result = (round(x * self._dpr), round(y * self._dpr),
+                           round(w * self._dpr), round(h * self._dpr))
         self.close()
 
     def paintEvent(self, _event) -> None:
@@ -905,14 +907,18 @@ class App(AppWindow):
 
     # ── UI action implementations (override AppWindow stubs) ──────────────────
 
-    def _primary_screen_physical(self) -> tuple[int, int]:
-        """Primary screen size in physical pixels (matches dxcam / capture region)."""
+    def _primary_screen_dpr(self) -> tuple[int, int, float]:
+        """Logical screen size + devicePixelRatio for the primary screen.
+
+        Returns (logical_w, logical_h, dpr). To get physical coordinates
+        multiply logical values by dpr (same as _RegionSelectorDlg._confirm).
+        """
         scr = QApplication.primaryScreen()
         if scr is None:
-            return 1920, 1080
+            return 1920, 1080, 1.0
         dpr = scr.devicePixelRatio()
-        g = scr.geometry()
-        return round(g.width() * dpr), round(g.height() * dpr)
+        g   = scr.geometry()
+        return g.width(), g.height(), dpr
 
     def _sync_run_button_state(self, *, starting: bool = False) -> None:
         """starting=True while models load (running not yet True) — show Stop like legacy UI."""
@@ -1023,7 +1029,7 @@ class App(AppWindow):
         active or still loading models.
         Returns True if capture was recreated.
         """
-        sw, sh = self._primary_screen_physical()
+        sw_log, sh_log, dpr = self._primary_screen_dpr()
         scale, corner = read_minimap_persisted()
         persisted_key: tuple[float | None, str] = (scale, corner)
         if scale is None:
@@ -1032,7 +1038,8 @@ class App(AppWindow):
             s = 1.0
         else:
             s = scale
-        region = auto_minimap_region(sw, sh, s, margin=8, corner=corner)
+        x_l, y_l, w_l, h_l = auto_minimap_region(sw_log, sh_log, s, margin=8, corner=corner)
+        region = (round(x_l * dpr), round(y_l * dpr), round(w_l * dpr), round(h_l * dpr))
         same_region = self.capture is not None and tuple(self.capture.region) == region
         same_key = self._last_persisted_minimap_key == persisted_key
         if same_region and same_key:
@@ -2012,11 +2019,12 @@ class App(AppWindow):
 
     def _auto_start_tracking(self) -> None:
         if self.capture is None:
-            sw, sh = self._primary_screen_physical()
+            sw_log, sh_log, dpr = self._primary_screen_dpr()
             scale, corner = read_minimap_persisted()
             if scale is None:
                 scale = 1.0
-            x, y, w, h = auto_minimap_region(sw, sh, scale, margin=8, corner=corner)
+            x_l, y_l, w_l, h_l = auto_minimap_region(sw_log, sh_log, scale, margin=8, corner=corner)
+            x, y, w, h = round(x_l * dpr), round(y_l * dpr), round(w_l * dpr), round(h_l * dpr)
             self.capture = Capture((x, y, w, h))
             self.region_lbl.setText(f"{w}×{h}  at ({x}, {y})  [auto]")
             self._sync_run_button_state()
