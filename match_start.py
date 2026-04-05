@@ -17,8 +17,8 @@ Identification uses a 2-stage pipeline:
       ORB is scale- and rotation-invariant, so it handles zoom mismatches
       that would fool plain NCC/template matching.
 
-Requires the cache built by rebuild_cache.py:
-    python rebuild_cache.py    # run once (downloads skins + builds index)
+Requires the cache built by tools.rebuild_cache:
+    python -m tools.rebuild_cache    # run once (downloads skins + builds index)
     python match_start.py <screenshot>
 """
 

@@ -41,7 +41,7 @@ dataset*/
 debug_crops/
 *.cache
 
-# Extra screenshots — RadarRift.spec bundles 060822 only
+# Extra screenshots — assets/ holds the 060822 file used by the spec
 *2026-03-08 193538.png
 *2026-03-08 194735.png
 

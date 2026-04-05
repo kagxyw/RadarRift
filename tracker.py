@@ -113,7 +113,7 @@ def canon_champ_key(name_or_key: str) -> str:
 
 
 def fetch_icon(key: str) -> Image.Image:
-    """Load square icon from cache/icons only (run rebuild_cache — no network)."""
+    """Load square icon from cache/icons only (run python -m tools.rebuild_cache — no network)."""
     ICON_DIR.mkdir(parents=True, exist_ok=True)
     exact = canon_champ_key(key)
     path  = ICON_DIR / f"{exact}.png"

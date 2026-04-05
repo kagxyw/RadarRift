@@ -115,7 +115,7 @@ class ChampionRoster:
 
 class DataDragon:
     """
-    Metadata + image paths from cache/ only. No HTTP — populate via rebuild_cache.
+    Metadata + image paths from cache/ only. No HTTP — populate via python -m tools.rebuild_cache.
     """
 
     def __init__(self) -> None:
@@ -172,7 +172,7 @@ class DataDragon:
         if matches:
             return Image.open(matches[0]).convert("RGB")
         raise FileNotFoundError(
-            f"No loading portrait in cache for {key!r} — run rebuild_cache.",
+            f"No loading portrait in cache for {key!r} — run python -m tools.rebuild_cache.",
         )
 
     def square_icon(self, key: str) -> Image.Image:
@@ -180,7 +180,7 @@ class DataDragon:
         path = _CACHE_ROOT / "icons" / f"{key}.png"
         if not path.exists():
             raise FileNotFoundError(
-                f"Missing icon {path.name} — run rebuild_cache (download_icons).",
+                f"Missing icon {path.name} — run python -m tools.rebuild_cache (download_icons).",
             )
         return Image.open(path).convert("RGB")
 

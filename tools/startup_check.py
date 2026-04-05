@@ -23,12 +23,13 @@ from pathlib import Path
 def _bundle_cache() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "cache"
-    return Path(__file__).parent / "cache"
+    return Path(__file__).resolve().parent.parent / "cache"
+
 
 def _user_cache() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent / "cache"
-    return Path(__file__).parent / "cache"
+    return Path(__file__).resolve().parent.parent / "cache"
 
 
 # ── missing-file checker ───────────────────────────────────────────────────────
@@ -143,7 +144,7 @@ def _run_downloads(items: list[_MissingItem],
     uc = _user_cache()
 
     try:
-        import rebuild_cache as _rc
+        from . import rebuild_cache as _rc
         _rc.CACHE_DIR    = bc
         _rc.THUMB_MATRIX = bc / "thumb_matrix.npy"
         _rc.HIST_MATRIX  = bc / "hist_matrix.npy"

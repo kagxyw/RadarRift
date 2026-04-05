@@ -17,7 +17,7 @@ pygame>=2.5.0
 # YOLOv11 ONNX in cache/ (minimap + splash)
 onnxruntime>=1.17.0
 
-# --- Optional: export .pt → .onnx (remake_onnx.py, onnx_model.export_*)
+# --- Optional: export .pt → .onnx (python -m tools.remake_onnx, onnx_model.export_*)
 # Pulls PyTorch; not needed if you only run with existing .onnx files.
 #   pip install ultralytics
 # ultralytics>=8.3.0

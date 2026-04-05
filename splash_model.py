@@ -50,7 +50,7 @@ def train(epochs: int = 200, lr: float = 0.05, imgsz: int = 1920) -> None:
     if not data_yaml.exists():
         raise FileNotFoundError(
             f"Dataset not found: {data_yaml}\n"
-            "Annotate loading screen screenshots with annotation_tool.py first."
+            "Annotate loading screen screenshots with: python -m tools.annotation_tool"
         )
 
     # Fine-tune from the best existing model; fall back to raw yolo11n

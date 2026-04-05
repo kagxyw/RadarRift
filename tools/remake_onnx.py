@@ -6,14 +6,14 @@ Requires:
   - cache/splash_detection.pt  (loading-screen splash detector → imgsz 1920)
   - ultralytics (pip install ultralytics)
 
-Usage:
-  python remake_onnx.py        # export only if .onnx missing
-  python remake_onnx.py --force # overwrite existing .onnx
+Usage (from repo root):
+  python -m tools.remake_onnx        # export only if .onnx missing
+  python -m tools.remake_onnx --force # overwrite existing .onnx
 """
 from pathlib import Path
 
 def main():
-    cache = Path(__file__).parent / "cache"
+    cache = Path(__file__).resolve().parent.parent / "cache"
     cache.mkdir(exist_ok=True)
 
     required = [
@@ -25,7 +25,7 @@ def main():
         print("Missing .pt files in cache/:")
         for name in missing:
             print(f"  {cache / name}")
-        print("\nAdd the .pt weights there, then run:  python remake_onnx.py [--force]")
+        print("\nAdd the .pt weights there, then run:  python -m tools.remake_onnx [--force]")
         return 1
 
     from onnx_model import export_all

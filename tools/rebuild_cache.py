@@ -5,7 +5,7 @@ Step 1 — skin portraits (default: wiki.leagueoflegends.com)
     Category:Champion_loading_screens: only the first layer of “… loading screens”
     subcategories (no deeper nesting); JPGs there only; skips root files; WR/old/etc.
 
-    Alternate:  python rebuild_cache.py --fandom-skins
+    Alternate:  python -m tools.rebuild_cache --fandom-skins
         Uses leagueoflegends.fandom.com instead.
 
 Step 2 — download_icons()
@@ -17,9 +17,9 @@ Step 3 — build_matrix()
     For each usable *.jpg in cache/ computes NCC + HSV histogram vectors.
     Saves thumb_matrix.npy, hist_matrix.npy, thumb_index.json.
 
-Usage:
-    python rebuild_cache.py
-    python rebuild_cache.py --fandom-skins
+Usage (from repo root):
+    python -m tools.rebuild_cache
+    python -m tools.rebuild_cache --fandom-skins
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ import numpy as np
 from PIL import Image
 
 
-CACHE_DIR    = Path(__file__).parent / "cache"
+CACHE_DIR    = Path(__file__).resolve().parent.parent / "cache"
 THUMB_MATRIX = CACHE_DIR / "thumb_matrix.npy"
 HIST_MATRIX  = CACHE_DIR / "hist_matrix.npy"   # HSV histograms for shortlist
 THUMB_INDEX  = CACHE_DIR / "thumb_index.json"

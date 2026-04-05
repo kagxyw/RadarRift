@@ -1,6 +1,6 @@
-# PyInstaller build — install runtime deps first, then:
+# PyInstaller build — install runtime deps first, then from repo root:
 #   pip install -r requirements-build.txt
-#   pyinstaller RadarRift.spec
+#   python -m PyInstaller packaging/RadarRift.spec
 
 -r requirements.txt
 PyInstaller>=6.3.0

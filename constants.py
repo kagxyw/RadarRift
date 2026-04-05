@@ -1,6 +1,14 @@
 """constants.py — Shared theme colours, paths, and small game-layout helpers."""
 
+import sys
 from pathlib import Path
+
+# Runtime: repo root. PyInstaller onedir: _MEIPASS (bundled datas land next to extracted libs).
+_ROOT = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):
+    ASSETS_DIR = Path(sys._MEIPASS)
+else:
+    ASSETS_DIR = _ROOT / "assets"
 
 
 def minimap_size(scale: float, screen_width: int) -> int:
@@ -19,5 +27,5 @@ ACT  = "#a6e3a1"   # green
 
 # ── Persistent state files ────────────────────────────────────────────────────
 
-_POS_FILE    = Path(__file__).parent / ".radarrift_pos.json"
-_ROSTER_FILE = Path(__file__).parent / ".radarrift_roster.json"
+_POS_FILE    = _ROOT / ".radarrift_pos.json"
+_ROSTER_FILE = _ROOT / ".radarrift_roster.json"

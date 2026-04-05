@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (
 
 from capture  import Capture
 from champions import Champion, ChampionRoster, STATUS_ON_MAP, STATUS_OFF_MAP
-from constants import BG, FG, DIM, ALLY, ENE, ACT, _POS_FILE, _ROSTER_FILE
+from constants import BG, FG, DIM, ALLY, ENE, ACT, ASSETS_DIR, _POS_FILE, _ROSTER_FILE
 from overlay_qt import QtOverlay
 from select_minimap import (
     auto_minimap_region,
@@ -102,7 +102,7 @@ def _is_black_screen(img: Image.Image, threshold: float = 15.0) -> bool:
     return float(arr.mean()) < threshold
 
 
-_PREVIEW_BG = Path(__file__).parent / "屏幕截图 2026-03-07 060822.png"
+_PREVIEW_BG = ASSETS_DIR / "屏幕截图 2026-03-07 060822.png"
 
 
 def _load_preview_bg(size: int) -> "np.ndarray | None":
@@ -2102,8 +2102,6 @@ class App(AppWindow):
         from PyQt6.QtGui     import QIcon
         from PyQt6.QtCore    import QSize
 
-        _HERE = Path(__file__).parent
-
         wrap = QWidget(self._roster_container)
         hl   = QHBoxLayout(wrap)
         hl.setContentsMargins(22, 0, 0, 2)
@@ -2121,7 +2119,7 @@ class App(AppWindow):
             btn.setFixedSize(52, 52)
             btn.setToolTip(label)
             if fname:
-                px = QPixmap(str(_HERE / fname))
+                px = QPixmap(str(ASSETS_DIR / fname))
                 if not px.isNull():
                     btn.setIcon(QIcon(px))
                     btn.setIconSize(QSize(42, 42))
@@ -2192,7 +2190,7 @@ class App(AppWindow):
             except Exception:
                 pass
         else:
-            img_path = Path(__file__).parent / fname
+            img_path = ASSETS_DIR / fname
             try:
                 import cv2 as _cv2
                 raw = img_path.read_bytes()

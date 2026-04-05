@@ -19,12 +19,12 @@ except Exception:
     except Exception:
         pass
 
-# Single QApplication for the whole process — startup_check, App, and overlay
+# Single QApplication for the whole process — tools.startup_check (optional), App, overlay
 # all reuse this instance via QApplication.instance().
 from PyQt6.QtWidgets import QApplication
 _qt_app = QApplication(sys.argv)
 
-# from startup_check import ensure_ready
+# from tools.startup_check import ensure_ready
 from app import App
 
 if __name__ == "__main__":

@@ -11,13 +11,13 @@ Keyboard:
   S / Ctrl+S   - save labels
   Ctrl+Z       - undo
 
-Run:
+Run (from repo root):
   1. Put PNG/JPG screenshots in:  session/images/
-  2. Double-click this file or run:  python annotation_tool.py
+  2. python -m tools.annotation_tool
   3. Labels are saved to:           session/labels/
 
 Run with a dataset split folder:
-  python annotation_tool.py path/to/images/train
+  python -m tools.annotation_tool path/to/images/train
 
 Requires: pip install pillow opencv-python numpy
 """
@@ -32,12 +32,14 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
+_ROOT = Path(__file__).resolve().parent.parent
+
 if len(_sys.argv) > 1:
     _split = Path(_sys.argv[1])
     IMG_DIR = _split
     LABEL_DIR = _split.parent.parent / "labels" / _split.name
 else:
-    SESSION_DIR = Path("session")
+    SESSION_DIR = _ROOT / "session"
     IMG_DIR = SESSION_DIR / "images"
     LABEL_DIR = SESSION_DIR / "labels"
 
@@ -433,7 +435,7 @@ class AnnotationTool:
         self.tk_img = ImageTk.PhotoImage(pil)
         lbl_path = LABEL_DIR / f"{p.stem}.txt"
         if not lbl_path.exists():
-            auto = Path("dataset_minimap/labels/train") / f"{p.stem}.txt"
+            auto = _ROOT / "dataset_minimap" / "labels" / "train" / f"{p.stem}.txt"
             if auto.exists():
                 shutil.copy(auto, lbl_path)
         self.boxes = load_labels(lbl_path)

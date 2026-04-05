@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 import numpy as np
 
 from PyQt6.QtCore import Qt
@@ -12,12 +11,11 @@ from PyQt6.QtWidgets import (
     QScrollArea
 )
 
-from constants import BG, FG, DIM, ALLY, ENE, ACT
+from constants import BG, FG, DIM, ALLY, ENE, ACT, ASSETS_DIR
 
 # Absolute paths to arrow SVGs (forward slashes required for Qt stylesheets)
-_HERE       = Path(__file__).parent
-_ARROW_UP   = (_HERE / "arrow_up.svg"  ).as_posix()
-_ARROW_DOWN = (_HERE / "arrow_down.svg").as_posix()
+_ARROW_UP   = (ASSETS_DIR / "arrow_up.svg").as_posix()
+_ARROW_DOWN = (ASSETS_DIR / "arrow_down.svg").as_posix()
 
 
 class SectionHeader(QWidget):

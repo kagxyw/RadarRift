@@ -35,12 +35,14 @@ Python **3.10+**, Windows.
 ## Build the `.exe` yourself
 
 1. `pip install -r requirements-build.txt`
-2. `python -m PyInstaller RadarRift.spec`
+2. From the repo root: `python -m PyInstaller packaging/RadarRift.spec`
 
-Output folder: **`dist/RadarRift/`**.
+Output folder: **`dist/RadarRift/`**. Spec and ONNX runtime hook live under **`packaging/`**; bundled images and SVGs live under **`assets/`**.
 
----
+### Maintenance CLIs *(from repo root)*
 
-## License
-
-Add a `LICENSE` file when you publish; until then, all rights reserved unless you state otherwise.
+| Command | Purpose |
+|--------|---------|
+| `python -m tools.rebuild_cache` | Download skins/icons and rebuild identification matrices into `cache/` |
+| `python -m tools.remake_onnx` | Export `.onnx` from Ultralytics `.pt` weights in `cache/` |
+| `python -m tools.annotation_tool` | Tk minimap labelling UI (optional `path/to/images/train`) |
