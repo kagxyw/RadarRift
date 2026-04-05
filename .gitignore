@@ -19,6 +19,8 @@ env/
 # App-local state (positions, roster)
 .radarrift_pos.json
 .radarrift_roster.json
+pos.json
+radarrift_pos.json
 
 # Downloaded game cache (icons, matrices) — run rebuild_cache.py
 cache/
@@ -30,11 +32,12 @@ cache_bundle_tmp/
 runs/
 wandb/
 
+# annotation_tool.py default layout (session/images, session/labels)
+session/
+
 # Local YOLO datasets & caches (optional; large)
-dataset/
-dataset_minimap/
-dataset_splash/
-dataset_champion/
+# Any root folder whose name starts with "dataset" (dataset, dataset_minimap, …)
+dataset*/
 debug_crops/
 *.cache
 
