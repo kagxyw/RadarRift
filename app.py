@@ -34,8 +34,19 @@ from PyQt6.QtWidgets import (
     QComboBox, QCompleter, QTextEdit, QPlainTextEdit,
 )
 
+from alert_audio import play_champion_tts, play_file
 from capture  import Capture
-from champions import Champion, ChampionRoster, STATUS_ON_MAP, STATUS_OFF_MAP
+from champions import (
+    Champion,
+    ChampionRoster,
+    enemy_lane_slots,
+    normalize_roster,
+    team_lane_slots,
+    STATUS_ON_MAP,
+    STATUS_OFF_MAP,
+    should_alert_for_role,
+)
+from constants import LANE_ROLES, LANE_ROLE_LABELS
 from constants import BG, FG, DIM, ALLY, ENE, ACT, ASSETS_DIR, _POS_FILE, _ROSTER_FILE
 from overlay_qt import QtOverlay
 from select_minimap import (
@@ -549,6 +560,8 @@ class App(AppWindow):
         self._last_persisted_minimap_key: tuple[float | None, str] | None = None
         self.alert_radius: int    = 0
         self.alert_sound:  str    = ""
+        self.alert_mode:  str    = "name"   # "ping" | "name"
+        self._alert_radius_explicit = False
         self._last_frame: np.ndarray | None = None
         self._infer_results: list = []
         self._infer_seq:     int  = 0
@@ -565,14 +578,17 @@ class App(AppWindow):
 
         self._enemies_in_radius: set[str]        = set()
         self._alert_exit_time:   dict[str, float] = {}
-        self._pygame_ready = False
+        self._enemy_on_map_since: dict[str, float] = {}
+        self._enemy_off_map_since: dict[str, float] = {}
+        self._alert_muted_enemies: set[str]       = set()
 
         # thread-safe setting caches
-        self._fps_cap:        int | None = 30
+        self._fps_cap:        int | None = 5
         self._yolo_conf:      float      = 0.35
         self._cooldown:       float      = 20.0
+        self._alert_mute_on_map: float  = 15.0
         self._volume:         float      = 0.80
-        self._off_timeout:    float      = 2.0
+        self._off_timeout:    float      = 1.0
         self._champ_size:     int        = 36
         self._ghost_alpha:    float      = 0.50
         self._timer_size:     int        = 10
@@ -607,7 +623,11 @@ class App(AppWindow):
         # wire up UI signal → cached setting → save
         self.fps_combo.currentTextChanged.connect(self._on_fps_change)
         self.cooldown_spin.valueChanged.connect(self._on_cooldown_change)
+        self.alert_mute_on_map_spin.valueChanged.connect(
+            self._on_alert_mute_on_map_change)
         self.volume_slider.valueChanged.connect(self._on_volume_change)
+        self.alert_mode_combo.currentIndexChanged.connect(self._on_alert_mode_change)
+        self._sync_alert_mode_ui()
         self.off_timeout_spin.valueChanged.connect(self._on_off_timeout_change)
         self.champ_size_spin.valueChanged.connect(self._on_champ_size_change)
         self.ghost_alpha_spin.valueChanged.connect(self._on_ghost_alpha_change)
@@ -641,6 +661,7 @@ class App(AppWindow):
 
         QTimer.singleShot(50, self._apply_capture_exclusion)
         threading.Thread(target=self._prewarm_splash_model, daemon=True).start()
+        threading.Thread(target=self._game_end_monitor_loop, daemon=True).start()
         self._start_watcher()
 
         qa = QApplication.instance()
@@ -700,6 +721,7 @@ class App(AppWindow):
     def _sync_settings_from_widgets(self) -> None:
         self._on_fps_change(self.fps_combo.currentText())
         self._on_cooldown_change(self.cooldown_spin.value())
+        self._on_alert_mute_on_map_change(self.alert_mute_on_map_spin.value())
         self._on_volume_change(self.volume_slider.value())
         self._on_off_timeout_change(self.off_timeout_spin.value())
         self._on_champ_size_change(self.champ_size_spin.value())
@@ -823,6 +845,62 @@ class App(AppWindow):
         except Exception:
             pass
         self._save_pos()
+
+    def _on_alert_mute_on_map_change(self, val=None) -> None:
+        try:
+            self._alert_mute_on_map = max(0.0, float(
+                val if val is not None else self.alert_mute_on_map_spin.value()))
+        except Exception:
+            pass
+        self._save_pos()
+
+    def _reset_alert_tracking(self) -> None:
+        self._enemies_in_radius.clear()
+        self._alert_exit_time.clear()
+        self._enemy_on_map_since.clear()
+        self._enemy_off_map_since.clear()
+        self._alert_muted_enemies.clear()
+
+    def _update_alert_mutes_for_on_map_time(self, roster: ChampionRoster,
+                                            now: float) -> None:
+        from constants import ALERT_UNMUTE_OFF_MAP_SEC
+
+        mute_sec = self._alert_mute_on_map
+        on_map_keys: set[str] = set()
+
+        for c in roster.enemies:
+            if c.status == STATUS_ON_MAP:
+                on_map_keys.add(c.key)
+                self._enemy_off_map_since.pop(c.key, None)
+                if mute_sec > 0:
+                    if c.key not in self._enemy_on_map_since:
+                        self._enemy_on_map_since[c.key] = now
+                    elif now - self._enemy_on_map_since[c.key] >= mute_sec:
+                        self._alert_muted_enemies.add(c.key)
+
+        for c in roster.enemies:
+            if c.status == STATUS_ON_MAP:
+                continue
+            key = c.key
+            if key not in self._enemy_off_map_since:
+                self._enemy_off_map_since[key] = now
+            if key in self._alert_muted_enemies:
+                if now - self._enemy_off_map_since[key] >= ALERT_UNMUTE_OFF_MAP_SEC:
+                    self._alert_muted_enemies.discard(key)
+                    self._enemy_on_map_since.pop(key, None)
+                    self._enemy_off_map_since.pop(key, None)
+            else:
+                self._enemy_on_map_since.pop(key, None)
+                self._enemy_off_map_since.pop(key, None)
+
+    def _enemy_allowed_for_radius_alert(self, enemy_key: str,
+                                        roster: ChampionRoster) -> bool:
+        if enemy_key in self._alert_muted_enemies:
+            return False
+        enemy = next((c for c in roster.enemies if c.key == enemy_key), None)
+        if enemy is None:
+            return True
+        return should_alert_for_role(roster.player.role, enemy.role)
 
     def _on_volume_change(self, val=None) -> None:
         try:
@@ -1057,6 +1135,7 @@ class App(AppWindow):
         self.capture = Capture(region)
         self._last_persisted_minimap_key = persisted_key
         self.region_lbl.setText(f"{w}×{h}  at ({x}, {y})  [auto]")
+        self._apply_default_alert_radius()
         self._sync_run_button_state()
         self._sync_death_capture()
         self._save_pos()
@@ -1089,6 +1168,7 @@ class App(AppWindow):
             x, y, w, h = sel.result
             self.capture = Capture(sel.result)
             self.region_lbl.setText(f"{w}×{h}  at ({x}, {y})")
+            self._apply_default_alert_radius()
             self._sync_run_button_state()
             self._sync_death_capture()
             self._save_pos()
@@ -1114,6 +1194,26 @@ class App(AppWindow):
             return
         self._death_region = None
         self._sync_death_capture()
+
+    def _minimap_edge_px(self) -> int:
+        if self.capture is not None and len(self.capture.region) >= 3:
+            return int(self.capture.region[2])
+        return 0
+
+    def _default_alert_radius_px(self) -> int:
+        """Default danger ring: 10% of minimap edge length."""
+        edge = self._minimap_edge_px()
+        return max(1, int(edge * 0.10)) if edge > 0 else 0
+
+    def _apply_default_alert_radius(self) -> None:
+        if self._alert_radius_explicit and self.alert_radius == 0:
+            return
+        if self.alert_radius > 0:
+            return
+        r = self._default_alert_radius_px()
+        if r > 0:
+            self.alert_radius = r
+            self._radius_lbl.setText(f"{r} px")
 
     def _select_alert_radius(self) -> None:
         # Small inline dialog: show minimap + circle preview
@@ -1189,9 +1289,33 @@ class App(AppWindow):
 
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.alert_radius = _radius_holder[0]
+            self._alert_radius_explicit = True
             self._radius_lbl.setText(
                 f"{self.alert_radius} px" if self.alert_radius else "Off")
             self._save_pos()
+
+    def _on_alert_mode_change(self, _index: int = 0) -> None:
+        self.alert_mode = self.alert_mode_combo.currentData() or "ping"
+        self._sync_alert_mode_ui()
+        self._save_pos()
+
+    def _sync_alert_mode_ui(self) -> None:
+        name_mode = self.alert_mode == "name"
+        self._sound_btn.setEnabled(not name_mode)
+        if name_mode:
+            from alert_audio import _TTS_DIRS
+            found = any((d / "Ahri.mp3").is_file() for d in _TTS_DIRS) or any(
+                d.is_dir() and any(d.glob("*.mp3")) for d in _TTS_DIRS
+            )
+            self._sound_lbl.setText("TTS" if found else "no tts_out")
+            self._sound_lbl.setStyleSheet(
+                f"color:{ACT if found else '#f38ba8'}; font-size:12px;")
+        elif self.alert_sound and Path(self.alert_sound).exists():
+            self._sound_lbl.setText("✓")
+            self._sound_lbl.setStyleSheet(f"color:{ACT}; font-size:12px;")
+        else:
+            self._sound_lbl.setText("need file")
+            self._sound_lbl.setStyleSheet(f"color:{DIM}; font-size:12px;")
 
     def _pick_alert_sound(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1205,7 +1329,10 @@ class App(AppWindow):
         self._save_pos()
 
     def _test_alert_sound(self) -> None:
-        threading.Thread(target=self._play_alert, daemon=True).start()
+        key = "Ahri"
+        if self.roster and self.roster.enemies:
+            key = self.roster.enemies[0].key
+        threading.Thread(target=self._play_alert, args=(key,), daemon=True).start()
 
     def _preview_overlay(self) -> None:
         import cv2
@@ -1457,7 +1584,7 @@ class App(AppWindow):
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Enter Champions Manually")
-        dlg.setMinimumWidth(460)
+        dlg.setMinimumWidth(520)
         dlg.setStyleSheet(
             f"QWidget{{background:{BG};color:{FG};}}"
             "QPushButton{border-radius:6px;padding:6px 12px;font-weight:bold;}"
@@ -1523,28 +1650,35 @@ class App(AppWindow):
             cb.setCompleter(comp)
             return cb
 
-        # ── your team: player + 4 allies ──────────────────────────────────────
+        # ── your team: Top | Jungle | Mid | ADC | Support (pick which lane is you) ─
         vl.addWidget(_your_team_lbl)
-        blue_grid = QWidget()
-        bg_lay = QHBoxLayout(blue_grid)
-        bg_lay.setContentsMargins(0, 0, 0, 0)
-        bg_lay.setSpacing(6)
+        team_grid = QWidget()
+        tg_lay = QHBoxLayout(team_grid)
+        tg_lay.setContentsMargins(0, 0, 0, 0)
+        tg_lay.setSpacing(6)
 
-        blue_combos: list[QComboBox] = []
-        blue_labels = ["Player", "Ally 1", "Ally 2", "Ally 3", "Ally 4"]
-        for lbl_txt in blue_labels:
+        team_combos: list[QComboBox] = []
+        player_lane_rbs: list[QRadioButton] = []
+        player_lane_grp = QButtonGroup(dlg)
+        for i, (role, lbl) in enumerate(zip(LANE_ROLES, LANE_ROLE_LABELS)):
             col = QWidget()
             cl  = QVBoxLayout(col)
             cl.setContentsMargins(0, 0, 0, 0)
             cl.setSpacing(2)
-            l = QLabel(lbl_txt)
-            l.setStyleSheet(f"color:{DIM}; font-size:10px;")
+            me_rb = QRadioButton("Me")
+            me_rb.setStyleSheet(f"color:{ACT}; font-size:10px;")
+            player_lane_grp.addButton(me_rb, i)
+            player_lane_rbs.append(me_rb)
+            lane_lbl = QLabel(lbl)
+            lane_lbl.setStyleSheet(f"color:{DIM}; font-size:10px; font-weight:bold;")
             cb = _make_combo()
-            cl.addWidget(l)
+            cl.addWidget(me_rb)
+            cl.addWidget(lane_lbl)
             cl.addWidget(cb)
-            bg_lay.addWidget(col)
-            blue_combos.append(cb)
-        vl.addWidget(blue_grid)
+            tg_lay.addWidget(col)
+            team_combos.append(cb)
+        player_lane_rbs[2].setChecked(True)  # default Mid
+        vl.addWidget(team_grid)
 
         # ── opposing side: 5 enemies ──────────────────────────────────────────
         vl.addWidget(_enemy_lbl)
@@ -1554,13 +1688,13 @@ class App(AppWindow):
         rg_lay.setSpacing(6)
 
         red_combos: list[QComboBox] = []
-        for i in range(1, 6):
+        for role, lbl in zip(LANE_ROLES, LANE_ROLE_LABELS):
             col = QWidget()
             cl  = QVBoxLayout(col)
             cl.setContentsMargins(0, 0, 0, 0)
             cl.setSpacing(2)
-            l = QLabel(f"Enemy {i}")
-            l.setStyleSheet(f"color:{DIM}; font-size:10px;")
+            l = QLabel(lbl)
+            l.setStyleSheet(f"color:{DIM}; font-size:10px; font-weight:bold;")
             cb = _make_combo()
             cl.addWidget(l)
             cl.addWidget(cb)
@@ -1595,14 +1729,18 @@ class App(AppWindow):
                 _rb_red.setChecked(True)
             _apply_side_labels()
 
-            # player + allies
-            _set_combo(blue_combos[0], r.player.name)
-            for i, ally in enumerate(r.allies[:4]):
-                _set_combo(blue_combos[i + 1], ally.name)
+            for role, champ, is_pl in team_lane_slots(r.player, r.allies):
+                if champ is None:
+                    continue
+                col = LANE_ROLES.index(role)
+                _set_combo(team_combos[col], champ.name)
+                if is_pl:
+                    player_lane_rbs[col].setChecked(True)
 
-            # enemies
-            for i, enemy in enumerate(r.enemies[:5]):
-                _set_combo(red_combos[i], enemy.name)
+            for role, champ in enemy_lane_slots(r.enemies):
+                if champ is None:
+                    continue
+                _set_combo(red_combos[LANE_ROLES.index(role)], champ.name)
 
         # ── buttons ───────────────────────────────────────────────────────────
         btn_row = QWidget()
@@ -1621,26 +1759,64 @@ class App(AppWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        def _combo_to_champ(cb: "QComboBox") -> Champion | None:
+        def _combo_to_champ(cb: "QComboBox", role: str) -> Champion | None:
             txt = cb.currentText().strip()
             if not txt:
                 return None
             dd_key = champ_map.get(txt, txt.replace(" ", ""))
-            return Champion(name=txt, key=dd_key)
+            return Champion(name=txt, key=dd_key, role=role)
 
-        player_c = _combo_to_champ(blue_combos[0])
-        if player_c is None:
-            return   # player is required
+        player_lane_idx = player_lane_grp.checkedId()
+        if player_lane_idx < 0:
+            return
+        player_role = LANE_ROLES[player_lane_idx]
+        player_raw = _combo_to_champ(team_combos[player_lane_idx], player_role)
+        if player_raw is not None:
+            player_c = Champion(
+                name=player_raw.name,
+                key=player_raw.key,
+                role=player_role,
+                is_player=True,
+            )
+        else:
+            player_c = Champion(
+                name="",
+                key="",
+                role=player_role,
+                is_player=True,
+            )
 
-        allies  = [c for cb in blue_combos[1:] if (c := _combo_to_champ(cb))]
-        enemies = [c for cb in red_combos    if (c := _combo_to_champ(cb))]
+        allies: list[Champion] = []
+        for i, (role, cb) in enumerate(zip(LANE_ROLES, team_combos)):
+            if i == player_lane_idx and player_raw is not None:
+                continue
+            if c := _combo_to_champ(cb, role):
+                allies.append(c)
+
+        enemies: list[Champion] = []
+        for role, cb in zip(LANE_ROLES, red_combos):
+            if c := _combo_to_champ(cb, role):
+                enemies.append(c)
+
+        if not (
+            player_raw is not None
+            or allies
+            or enemies
+        ):
+            self._set_status("Enter at least one champion.", "stop")
+            return
 
         was_running = self.running
         if was_running:
             self._stop()
-        self.roster   = ChampionRoster(player=player_c, allies=allies,
-                                       enemies=enemies)
+        enemy_side = "red" if _rb_blue.isChecked() else "blue"
+        self.roster   = normalize_roster(ChampionRoster(
+            player=player_c, allies=allies, enemies=enemies,
+            enemy_side=enemy_side,
+        ))
+        self._save_roster_file(self.roster)
         self._library = None
+        self._reset_alert_tracking()
         self._build_roster_display()
         self._set_status("Manual roster set — start tracker when ready.", "id")
         threading.Thread(target=self._rebuild_library, daemon=True).start()
@@ -1737,10 +1913,10 @@ class App(AppWindow):
             self._infer_results = results
             self._infer_seq    += 1
 
-            # update preview-dialog snapshot every 10 frames (cheap copy)
-            if self._infer_seq % 10 == 0:
-                self._dbg_minimap_rgb = arr.copy()
-                self._dbg_results     = list(results)
+            # # update preview-dialog snapshot every 10 frames (cheap copy)
+            # if self._infer_seq % 10 == 0:
+            #     self._dbg_minimap_rgb = arr.copy()
+            #     self._dbg_results     = list(results)
 
             # death panel — temporarily disabled
             # try:
@@ -1767,7 +1943,8 @@ class App(AppWindow):
             # alert proximity
             player_key    = library.roster.player.key
             player_on_map = any(r["key"] == player_key for r in results)
-            if self.alert_radius > 0 and player_on_map:
+            if roster and self.alert_radius > 0 and player_on_map:
+                self._update_alert_mutes_for_on_map_time(roster, t0)
                 pst = library._state.get(player_key)
                 if pst and pst.pos:
                     px, py   = pst.pos
@@ -1781,9 +1958,14 @@ class App(AppWindow):
                     for key in (self._enemies_in_radius - now_in):
                         self._alert_exit_time[key] = t0
                     for key in (now_in - self._enemies_in_radius):
+                        if not self._enemy_allowed_for_radius_alert(key, roster):
+                            continue
                         if t0 - self._alert_exit_time.get(key, 0.0) >= cooldown:
-                            threading.Thread(target=self._play_alert,
-                                             daemon=True).start()
+                            threading.Thread(
+                                target=self._play_alert,
+                                args=(key,),
+                                daemon=True,
+                            ).start()
                     self._enemies_in_radius = now_in
 
             cap      = self._fps_cap
@@ -1852,19 +2034,23 @@ class App(AppWindow):
 
     # ── alert sound ────────────────────────────────────────────────────────────
 
-    def _play_alert(self) -> None:
-        if not self.alert_sound or not Path(self.alert_sound).exists():
+    def _play_alert(self, enemy_key: str | None = None) -> None:
+        vol = self._volume
+        if self.alert_mode == "name":
+            if not enemy_key:
+                return
+            display = None
+            if self.roster:
+                for c in self.roster.enemies:
+                    if c.key == enemy_key:
+                        display = c.name
+                        break
+            if not play_champion_tts(enemy_key, vol, display_name=display):
+                if self.alert_sound and Path(self.alert_sound).exists():
+                    play_file(self.alert_sound, vol)
             return
-        try:
-            import pygame
-            if not self._pygame_ready:
-                pygame.mixer.init()
-                self._pygame_ready = True
-            snd = pygame.mixer.Sound(self.alert_sound)
-            snd.set_volume(self._volume)
-            snd.play()
-        except Exception:
-            pass
+        if self.alert_sound and Path(self.alert_sound).exists():
+            play_file(self.alert_sound, vol)
 
     # ── auto-watcher ───────────────────────────────────────────────────────────
 
@@ -1874,6 +2060,15 @@ class App(AppWindow):
             self._splash_model = load_splash_model()
         except Exception:
             self._splash_model = None
+
+    def _release_splash_model(self) -> None:
+        """Free splash ONNX once loading-screen scan ends (in-game / minimap phase)."""
+        self._splash_model = None
+        try:
+            from backend import unload_splash_model
+            unload_splash_model()
+        except Exception:
+            pass
 
     def _start_watcher(self) -> None:
         self._stop_watch.clear()
@@ -1899,7 +2094,8 @@ class App(AppWindow):
                     from backend import load_splash_model
                     splash_model = self._splash_model = load_splash_model()
                 except Exception:
-                    pass
+                    splash_model = None
+                    self._splash_model = None
 
             # Only count seconds when we actually ran YOLO — alt-tab /
             # transition frames don't eat into the budget.
@@ -1908,63 +2104,70 @@ class App(AppWindow):
             scan_elapsed = 0.0
             _lol_check_t = 0.0   # throttle the expensive tasklist call
 
-            # ── phase 2: scan for loading screen ─────────────────────────────
+            # ── phase 2: scan for loading screen (splash model only this window) ─
             detected = False
-            while not self._stop_watch.is_set():
-                # Check LoL still running at most once every 5 s (tasklist is slow)
-                now_t = time.perf_counter()
-                if now_t - _lol_check_t >= 5.0:
-                    if not _lol_running():
-                        self._sig_status.emit(
-                            "Waiting for League of Legends…", "wait")
-                        break
-                    _lol_check_t = now_t
+            try:
+                while not self._stop_watch.is_set():
+                    # Check LoL still running at most once every 5 s (tasklist is slow)
+                    now_t = time.perf_counter()
+                    if now_t - _lol_check_t >= 5.0:
+                        if not _lol_running():
+                            self._sig_status.emit(
+                                "Waiting for League of Legends…", "wait")
+                            break
+                        _lol_check_t = now_t
 
-                try:
-                    img = _grab_fullscreen()
-                except Exception:
-                    time.sleep(0.5)
-                    continue
-
-                # Skip black/transition frames but do NOT count them against
-                # the timeout — they are not real "scan" cycles.
-                if _is_black_screen(img):
-                    consecutive = 0
-                    time.sleep(0.3)
-                    continue
-
-                if scan_elapsed >= _SPLASH_TIMEOUT:
-                    self._sig_status.emit(
-                        "Loading screen not detected — enter manually", "wait")
-                    return
-
-                n_cards      = 0
-                splash_boxes: list = []
-                name_boxes:   list = []
-                if splash_model is not None:
                     try:
-                        from backend import detect_cards
-                        result = detect_cards(splash_model, img)
-                        if isinstance(result, tuple):
-                            splash_boxes, name_boxes = result
-                        else:
-                            splash_boxes = result
-                        n_cards = len(splash_boxes)
+                        img = _grab_fullscreen()
                     except Exception:
-                        n_cards = 0
+                        time.sleep(0.5)
+                        continue
 
-                consecutive   = (consecutive + 1) if n_cards == 10 else 0
-                # Only advance elapsed when we actually attempted a scan
-                scan_elapsed += 0.5
-                remaining     = max(0, int(_SPLASH_TIMEOUT - scan_elapsed))
-                self._sig_status.emit(
-                    f"Scanning… ({n_cards}/10 cards)  {remaining}s", "scan")
+                    # Skip black/transition frames but do NOT count them against
+                    # the timeout — they are not real "scan" cycles.
+                    if _is_black_screen(img):
+                        consecutive = 0
+                        time.sleep(0.3)
+                        continue
 
-                if consecutive >= 3:
-                    self._sig_auto_id.emit(img, splash_boxes, name_boxes)
-                    detected = True
-                    break
-                time.sleep(0.5)
+                    if scan_elapsed >= _SPLASH_TIMEOUT:
+                        self._sig_status.emit(
+                            "Loading screen not detected — enter manually", "wait")
+                        # Do not return — that kills the watcher thread. Wait until the
+                        # game process exits, then outer loop can watch for the next game.
+                        while not self._stop_watch.is_set() and _lol_running():
+                            time.sleep(2)
+                        break
+
+                    n_cards      = 0
+                    splash_boxes: list = []
+                    name_boxes:   list = []
+                    if splash_model is not None:
+                        try:
+                            from backend import detect_cards
+                            result = detect_cards(splash_model, img)
+                            if isinstance(result, tuple):
+                                splash_boxes, name_boxes = result
+                            else:
+                                splash_boxes = result
+                            n_cards = len(splash_boxes)
+                        except Exception:
+                            n_cards = 0
+
+                    consecutive   = (consecutive + 1) if n_cards == 10 else 0
+                    # Only advance elapsed when we actually attempted a scan
+                    scan_elapsed += 0.5
+                    remaining     = max(0, int(_SPLASH_TIMEOUT - scan_elapsed))
+                    self._sig_status.emit(
+                        f"Scanning… ({n_cards}/10 cards)  {remaining}s", "scan")
+
+                    if consecutive >= 3:
+                        self._sig_auto_id.emit(img, splash_boxes, name_boxes)
+                        detected = True
+                        break
+                    time.sleep(0.5)
+            finally:
+                self._release_splash_model()
 
             if detected or self._stop_watch.is_set():
                 return
@@ -1977,6 +2180,27 @@ class App(AppWindow):
         threading.Thread(target=self._do_identify,
                          args=(screenshot, splash_boxes, name_boxes),
                          daemon=True).start()
+
+    def _save_roster_file(self, roster: ChampionRoster) -> None:
+        try:
+            _ROSTER_FILE.write_text(json.dumps({
+                "player": {
+                    "name": roster.player.name,
+                    "key": roster.player.key,
+                    "role": roster.player.role,
+                },
+                "allies": [
+                    {"name": c.name, "key": c.key, "role": c.role}
+                    for c in roster.allies
+                ],
+                "enemies": [
+                    {"name": c.name, "key": c.key, "role": c.role}
+                    for c in roster.enemies
+                ],
+                "enemy_side": roster.enemy_side,
+            }, indent=2))
+        except Exception:
+            pass
 
     def _do_identify(self, screenshot: Image.Image,
                      splash_boxes: list | None = None,
@@ -1995,21 +2219,13 @@ class App(AppWindow):
             self._sig_status.emit("Detection failed — enter manually.", "stop")
             return
 
-        try:
-            _ROSTER_FILE.write_text(json.dumps({
-                "player":  {"name": roster.player.name,  "key": roster.player.key},
-                "allies":  [{"name": c.name, "key": c.key} for c in roster.allies],
-                "enemies": [{"name": c.name, "key": c.key} for c in roster.enemies],
-            }, indent=2))
-        except Exception:
-            pass
-
+        self._save_roster_file(roster)
         self._sig_roster_done.emit(roster)
-        threading.Thread(target=self._watch_game_end, daemon=True).start()
 
     def _on_roster_identified(self, roster) -> None:
         """Main-thread slot: apply identified roster and start tracker."""
-        self.roster        = roster
+        self._reset_alert_tracking()
+        self.roster        = normalize_roster(roster)
         self._library      = None
         self._champ_forms  = {}   # reset every new game — all forms start at base
         self._form_btn_map = {}
@@ -2027,6 +2243,7 @@ class App(AppWindow):
             x, y, w, h = round(x_l * dpr), round(y_l * dpr), round(w_l * dpr), round(h_l * dpr)
             self.capture = Capture((x, y, w, h))
             self.region_lbl.setText(f"{w}×{h}  at ({x}, {y})  [auto]")
+            self._apply_default_alert_radius()
             self._sync_run_button_state()
             self._set_status("Auto minimap from PersistedSettings — starting tracker…", "id")
         if self._death_capture is None:
@@ -2050,40 +2267,53 @@ class App(AppWindow):
                 pass
         self._death_capture = Capture(region)
 
-    def _watch_game_end(self) -> None:
+    def _game_end_monitor_loop(self) -> None:
+        """While tracking is active, detect when League of Legends.exe exits and
+        reset for the next match (same for auto splash and manual roster)."""
         while not self._stop_watch.is_set():
             time.sleep(3)
+            if self._stop_watch.is_set():
+                break
+            if not self.running:
+                continue
             if not _lol_running():
                 self._sig_game_ended.emit()
-                return
+                # Avoid emitting again before _on_game_ended stops the tracker.
+                while not self._stop_watch.is_set():
+                    time.sleep(1)
+                    if not self.running:
+                        break
+                    if _lol_running():
+                        break
 
     def _on_game_ended(self) -> None:
         self._stop()
         self.roster   = None
         self._library = None
+        self._reset_alert_tracking()
         self._build_roster_display()
         self._set_status("Game ended — waiting for League of Legends…", "wait")
         self._start_watcher()
 
-    # ── splash debug ───────────────────────────────────────────────────────────
-
-    def _save_splash_debug(self, img: Image.Image,
-                           splash_boxes: list, name_boxes: list) -> None:
-        try:
-            import cv2
-            arr = np.array(img.convert("RGB"))
-            bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-            for i, (x1, y1, x2, y2) in enumerate(splash_boxes):
-                cv2.rectangle(bgr, (x1, y1), (x2, y2), (0, 255, 80), 3)
-                cv2.putText(bgr, f"card {i+1}", (x1 + 4, y1 + 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 80), 2)
-            for i, (x1, y1, x2, y2) in enumerate(name_boxes):
-                cv2.rectangle(bgr, (x1, y1), (x2, y2), (0, 180, 255), 2)
-                cv2.putText(bgr, f"name {i+1}", (x1 + 4, y1 + 16),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 180, 255), 1)
-            cv2.imwrite("debug_splash_latest.jpg", bgr)
-        except Exception:
-            pass
+    # # ── splash debug ───────────────────────────────────────────────────────────
+    #
+    # def _save_splash_debug(self, img: Image.Image,
+    #                        splash_boxes: list, name_boxes: list) -> None:
+    #     try:
+    #         import cv2
+    #         arr = np.array(img.convert("RGB"))
+    #         bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+    #         for i, (x1, y1, x2, y2) in enumerate(splash_boxes):
+    #             cv2.rectangle(bgr, (x1, y1), (x2, y2), (0, 255, 80), 3)
+    #             cv2.putText(bgr, f"card {i+1}", (x1 + 4, y1 + 20),
+    #                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 80), 2)
+    #         for i, (x1, y1, x2, y2) in enumerate(name_boxes):
+    #             cv2.rectangle(bgr, (x1, y1), (x2, y2), (0, 180, 255), 2)
+    #             cv2.putText(bgr, f"name {i+1}", (x1 + 4, y1 + 16),
+    #                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 180, 255), 1)
+    #         cv2.imwrite("debug_splash_latest.jpg", bgr)
+    #     except Exception:
+    #         pass
 
     # ── persistence ────────────────────────────────────────────────────────────
 
@@ -2233,7 +2463,9 @@ class App(AppWindow):
                 "fps":                self.fps_combo.currentText(),
                 "alert_radius":       self.alert_radius,
                 "alert_sound":        self.alert_sound,
+                "alert_mode":         self.alert_mode,
                 "alert_cooldown":     self.cooldown_spin.value(),
+                "alert_mute_on_map":  self.alert_mute_on_map_spin.value(),
                 "alert_volume":       self.volume_slider.value(),
                 "off_timeout":        self.off_timeout_spin.value(),
                 "champ_size":         self.champ_size_spin.value(),
@@ -2278,23 +2510,29 @@ class App(AppWindow):
                 self.move(max(vl, min(int(gx), vr - 100)),
                           max(vt, min(int(gy), vb - 50)))
 
-            r = data.get("alert_radius", 0)
-            if isinstance(r, int) and r >= 0:
-                self.alert_radius = r
-                self._radius_lbl.setText(f"{r} px" if r else "Off")
+            self._alert_radius_explicit = "alert_radius" in data
+            if self._alert_radius_explicit:
+                r = data.get("alert_radius", 0)
+                if isinstance(r, int) and r >= 0:
+                    self.alert_radius = r
+                    self._radius_lbl.setText(f"{r} px" if r else "Off")
+
+            mode = data.get("alert_mode", "name")
+            if mode in ("ping", "name"):
+                self.alert_mode = mode
+                idx = self.alert_mode_combo.findData(mode)
+                if idx >= 0:
+                    self.alert_mode_combo.setCurrentIndex(idx)
 
             snd = data.get("alert_sound", "")
             if snd and Path(snd).exists():
                 self.alert_sound = snd
-                self._sound_lbl.setText("✓")
-                self._sound_lbl.setStyleSheet(f"color:{ACT}; font-size:12px;")
-            else:
-                self._sound_lbl.setText("need file")
-                self._sound_lbl.setStyleSheet(f"color:{DIM}; font-size:12px;")
+            self._sync_alert_mode_ui()
 
             for attr, key, default in (
-                ("cooldown_spin",      "alert_cooldown", 20.0),
-                ("off_timeout_spin",   "off_timeout",     2.5),
+                ("cooldown_spin",           "alert_cooldown",    20.0),
+                ("alert_mute_on_map_spin",  "alert_mute_on_map", 15.0),
+                ("off_timeout_spin",        "off_timeout",        1.0),
             ):
                 try:
                     getattr(self, attr).setValue(
@@ -2319,8 +2557,8 @@ class App(AppWindow):
                 except Exception:
                     pass
 
-            fps = str(data.get("fps", "30"))
-            if fps in {"1", "5", "15", "30", "Unlimited"}:
+            fps = str(data.get("fps", "5"))
+            if fps in {"1", "3", "5", "10", "15", "Unlimited"}:
                 self.fps_combo.setCurrentText(fps)
 
             self.capture_hidden_cb.setChecked(
@@ -2332,6 +2570,7 @@ class App(AppWindow):
                 x, y, w, h = region
                 self.capture = Capture((x, y, w, h))
                 self.region_lbl.setText(f"{w}×{h}  at ({x}, {y})")
+                self._apply_default_alert_radius()
                 self._sync_run_button_state()
 
             death_region = data.get("death_region")

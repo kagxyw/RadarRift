@@ -55,7 +55,7 @@ _TRAIL_LEN        = 3    # number of confirmed positions kept for direction arro
 _MIN_CONFIRM      = 5    # consecutive matches needed before committing a position
 _CLOSE_PX         = 18   # movement ≤ this many px is accepted immediately (same champ)
 # Stage 1 — HSV histogram (Bhattacharyya)
-_BC_THRESHOLD   = 0.3   # reject if BC below this
+_BC_THRESHOLD   = 0.5   # reject if BC below this; skip ORB/assignment for weaker pairs
 _HIST_TOP_K     = 5      # candidates forwarded from histogram to ORB
 _HIST_BINS      = [16, 8, 8]
 _HIST_RANGES    = [0, 180, 0, 256, 0, 256]
@@ -348,11 +348,12 @@ def _save_debug_frames(frame_bgr: np.ndarray,
                        library: "ChampionLibrary",
                        results: "list[dict] | None" = None,
                        combined: "np.ndarray | None" = None,
-                       orb_extra: "np.ndarray | None" = None) -> None:
+                       orb_extra: "np.ndarray | None" = None,
+                       bc_threshold: float = _BC_THRESHOLD) -> None:
     """
     Write debug images to debug_crops/:
       yolo_boxes.jpg    — raw YOLO detections
-      hsv_matches.jpg   — best HSV histogram match per box
+      hsv_matches.jpg   — boxes whose best BC cleared threshold (rect only)
       orb_top3.jpg      — top-3 combined scores per box with BC+ORB breakdown
       tracker_output.jpg— confirmed champion identifications (team-coloured)
       {team}_{key}.png  — individual crop for each confirmed detection
@@ -380,27 +381,29 @@ def _save_debug_frames(frame_bgr: np.ndarray,
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 80), 1)
         cv2.imwrite(str(crops_dir / "yolo_boxes.jpg"), yolo_img)
 
-        # ── 2: HSV best-match per box ─────────────────────────────────────────
+        # ── 2: HSV shortlist passes (boxes only; BC >= threshold) ─────────────
         hsv_img = frame_bgr.copy()
         for bi, b in enumerate(boxes):
             x1, y1, x2, y2 = b
-            top_ci  = int(bc_mat[:, bi].argmax())
-            top_bc  = float(bc_mat[top_ci, bi])
-            name    = library.all[top_ci].key if top_ci < len(library.all) else "?"
-            label   = f"{name} {top_bc:.2f}"
+            if float(bc_mat[:, bi].max()) < bc_threshold:
+                continue
             cv2.rectangle(hsv_img, (x1, y1), (x2, y2), (255, 160, 0), 2)
-            cv2.putText(hsv_img, label, (x1, max(y1 - 4, 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 160, 0), 1)
         cv2.imwrite(str(crops_dir / "hsv_matches.jpg"), hsv_img)
 
-        # ── 3: ORB top-3 combined scores per box ─────────────────────────────
+        # ── 3: ORB top-3 (boxes that cleared BC threshold only) ───────────────
         if combined is not None and orb_extra is not None and len(boxes) > 0:
             orb_img = frame_bgr.copy()
             for bi, b in enumerate(boxes):
+                if float(bc_mat[:, bi].max()) < bc_threshold:
+                    continue
                 x1, y1, x2, y2 = b
-                top3_ci = np.argsort(combined[:, bi])[-3:][::-1]
+                eligible = np.where(bc_mat[:, bi] >= bc_threshold)[0]
+                if len(eligible) == 0:
+                    continue
+                top3_ci = eligible[np.argsort(combined[eligible, bi])[-3:][::-1]]
                 cv2.rectangle(orb_img, (x1, y1), (x2, y2), (0, 200, 255), 2)
                 for rank, ci in enumerate(top3_ci):
+                    ci = int(ci)
                     name    = library.all[ci].key if ci < len(library.all) else "?"
                     comb_sc = float(combined[ci, bi])
                     bc_sc   = float(bc_mat[ci, bi])
@@ -472,7 +475,6 @@ def track_frame(
     library.off_timeout = off_timeout   # make it available to _draw
 
     from backend import infer as _infer
-    global _debug_frame_counter
     frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
     dets = _infer(_get_yolo(model), frame_bgr, conf=conf)
     if not dets:
@@ -489,9 +491,14 @@ def track_frame(
     bc_mat     = library.sqrt_hist @ sqrt_crop.T           # (n_champ, n_box)
 
     # ── Stage 2: ORB verification for top-K histogram candidates ─────────────
-    # Compute query ORB descriptors once per box
+    # Skip boxes whose best BC is below threshold (no ORB / assignment work).
+    box_ok = [float(bc_mat[:, bi].max()) >= threshold for bi in range(n_box)]
+
     query_descs: list[np.ndarray | None] = []
-    for b in boxes:
+    for bi, b in enumerate(boxes):
+        if not box_ok[bi]:
+            query_descs.append(None)
+            continue
         x1, y1, x2, y2 = b
         crop_arr = frame_rgb[y1:y2, x1:x2]
         if crop_arr.size == 0:
@@ -504,24 +511,26 @@ def track_frame(
             gray_u8 = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY) if gray.ndim == 3 else gray
             query_descs.append(_img_orb_desc(gray_u8))
 
-    # Build combined score matrix; ORB only computed for shortlisted pairs
     combined  = bc_mat.copy()
     orb_extra = np.zeros_like(bc_mat)
 
     for bi in range(n_box):
-        # shortlist: indices of top-K champions by BC for this box
+        if not box_ok[bi]:
+            continue
         shortlist = np.argsort(bc_mat[:, bi])[-_HIST_TOP_K:]
         for ci in shortlist:
-            matches         = _orb_match_count(query_descs[bi],
-                                               library.orb_refs[ci])
-            orb_norm        = min(matches / _ORB_SCALE, 1.0)
-            orb_extra[ci, bi] = orb_norm
+            if float(bc_mat[ci, bi]) < threshold:
+                continue
+            matches = _orb_match_count(query_descs[bi], library.orb_refs[ci])
+            orb_extra[ci, bi] = min(matches / _ORB_SCALE, 1.0)
 
     combined += _ORB_W * orb_extra
 
-    # ── Position bonus ────────────────────────────────────────────────────────
+    # ── Position bonus (only for BC-clearing pairs) ───────────────────────────
     for ci, c in enumerate(library.all):
         for bi, (cx, cy) in enumerate(centres):
+            if float(bc_mat[ci, bi]) < threshold:
+                continue
             combined[ci, bi] += library._pos_bonus(c.key, cx, cy)
 
     # ── Greedy assignment; BC alone must clear threshold ──────────────────────
@@ -592,11 +601,12 @@ def track_frame(
             if st.pos is not None and not library.is_visible(c.key, now, off_timeout):
                 st.ghost_active = True
 
-    # ── Debug snapshot (every _DEBUG_INTERVAL frames) ────────────────────────
+    # # ── Debug snapshot (every _DEBUG_INTERVAL frames) ────────────────────────
     # _debug_frame_counter += 1
     # if _debug_frame_counter % _DEBUG_INTERVAL == 0:
     #     _save_debug_frames(frame_bgr, dets, boxes, bc_mat, library, results,
-    #                        combined=combined, orb_extra=orb_extra)
+    #                        combined=combined, orb_extra=orb_extra,
+    #                        bc_threshold=threshold)
 
     return results
 

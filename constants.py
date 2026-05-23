@@ -29,3 +29,26 @@ ACT  = "#a6e3a1"   # green
 
 _POS_FILE    = _ROOT / ".radarrift_pos.json"
 _ROSTER_FILE = _ROOT / ".radarrift_roster.json"
+
+# LoL lane roles (for radius-alert filtering + manual roster column order)
+LANE_ROLES = ("top", "jungle", "mid", "adc", "support")
+LANE_ROLE_LABELS = ("Top", "Jungle", "Mid", "ADC", "Support")
+BOT_LANE_ROLES = frozenset({"adc", "support"})
+
+# Manual / shorthand → canonical lane id (for alert role filter)
+ROLE_ALIASES: dict[str, str] = {
+    "jg": "jungle",
+    "jun": "jungle",
+    "jgl": "jungle",
+    "sup": "support",
+    "bot": "adc",
+}
+
+
+def normalize_lane_role(role: str) -> str:
+    r = (role or "").strip().lower()
+    return ROLE_ALIASES.get(r, r)
+
+
+# After mute-on-map triggers, enemy must stay off minimap this long before alerts return
+ALERT_UNMUTE_OFF_MAP_SEC = 10.0

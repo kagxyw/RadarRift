@@ -89,8 +89,31 @@ def _model_issues(path: Path) -> str | None:
     return None
 
 
+def _minimap_onnx_ok(bc: Path, uc: Path) -> bool:
+    """Runtime uses champion_yolo11n.onnx; accept legacy / export alias names."""
+    for base in (bc, uc):
+        for name in (
+            "champion_yolo11n.onnx",
+            "minimap_yolo11n.onnx",
+            "yolo11n.onnx",
+        ):
+            p = base / name
+            if p.is_file() and _model_issues(p) is None:
+                return True
+    return False
+
+
+def _splash_onnx_ok(bc: Path, uc: Path) -> bool:
+    for base in (bc, uc):
+        p = base / "splash_detection.onnx"
+        if p.is_file() and _model_issues(p) is None:
+            return True
+    return False
+
+
 def _missing() -> list[_MissingItem]:
     bc    = _bundle_cache()
+    uc    = _user_cache()
     items: list[_MissingItem] = []
 
     if _icon_issues(bc / "icons"):
@@ -99,12 +122,17 @@ def _missing() -> list[_MissingItem]:
     if _matrix_issues(bc):
         items.append(_MissingItem("Skin identification matrix", "matrix"))
 
-    for onnx_name, label in (
-        ("minimap_yolo11n.onnx",  "Minimap detection model"),
-        ("splash_detection.onnx", "Splash detection model"),
-    ):
-        if _model_issues(bc / onnx_name):
-            items.append(_MissingItem(label, "splash_missing"))
+    if not _minimap_onnx_ok(bc, uc):
+        items.append(
+            _MissingItem(
+                "Minimap ONNX (champion_yolo11n.onnx or minimap_yolo11n.onnx)",
+                "bundle_onnx",
+            )
+        )
+    if not _splash_onnx_ok(bc, uc):
+        items.append(
+            _MissingItem("Splash ONNX (splash_detection.onnx)", "bundle_onnx")
+        )
 
     return items
 
@@ -192,10 +220,13 @@ def _run_downloads(items: list[_MissingItem],
                 )
             on_step("  Minimap model done.")
 
-        if "splash_missing" in keys:
-            on_done(False,
-                    "A bundled detection model is missing or corrupt.\n"
-                    "Please re-download the full RadarRift package.")
+        if "bundle_onnx" in keys:
+            on_done(
+                False,
+                "A detection ONNX model is missing or corrupt.\n"
+                "Put champion_yolo11n.onnx and splash_detection.onnx in the "
+                "cache folder next to RadarRift.exe (or reinstall the full build).",
+            )
             return
 
     except Exception as e:

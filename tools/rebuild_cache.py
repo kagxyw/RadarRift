@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from collections import deque
 import urllib.parse
@@ -36,8 +37,16 @@ import cv2
 import numpy as np
 from PIL import Image
 
+# ensure repo root is on sys.path when run as a plain script
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from loading_keys import resolve_wiki_loading_stem
+
 
 CACHE_DIR    = Path(__file__).resolve().parent.parent / "cache"
+_CHAMP_REG   = CACHE_DIR / "champion_registry.json"
 THUMB_MATRIX = CACHE_DIR / "thumb_matrix.npy"
 HIST_MATRIX  = CACHE_DIR / "hist_matrix.npy"   # HSV histograms for shortlist
 THUMB_INDEX  = CACHE_DIR / "thumb_index.json"
@@ -456,6 +465,14 @@ def download_skins_fandom(
 
 # ── matrix builder ────────────────────────────────────────────────────────────
 
+def _load_champion_registry() -> dict[str, dict]:
+    if not _CHAMP_REG.is_file():
+        return {}
+    raw = json.loads(_CHAMP_REG.read_text(encoding="utf-8"))
+    data = raw.get("data", raw)
+    return data if isinstance(data, dict) else {}
+
+
 def _is_cache_skin_jpg(path: Path) -> bool:
     """
     Numeric skin id:  Champion_12.jpg
@@ -479,6 +496,8 @@ def build_matrix(verbose: bool = True,
         print("No .jpg files found in cache/.")
         return
 
+    champ_reg = _load_champion_registry()
+
     if verbose:
         print(f"Building cache from {len(jpgs)} skins …")
 
@@ -499,9 +518,9 @@ def build_matrix(verbose: bool = True,
 
         ncc_vecs.append(_ncc_vec(img))
         hist_vecs.append(_hsv_hist(img))
-        key = jpg.stem.split("_")[0]
-        skin_id = jpg.stem[len(key) + 1 :] if "_" in jpg.stem else ""
-        index.append({"key": key, "name": key, "skin": skin_id, "file": jpg.name})
+        stem = jpg.stem
+        key, name, skin_id = resolve_wiki_loading_stem(stem, champ_reg)
+        index.append({"key": key, "name": name, "skin": skin_id, "file": jpg.name})
         if on_progress:
             on_progress(i + 1, len(jpgs))
 

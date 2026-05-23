@@ -6,6 +6,8 @@ a ChampionRoster ready for the minimap tracker.
 
 Blue side = top row.  Red side = bottom row.
 
+Splash layout (each row, left → right): Top, Jungle, Mid, ADC, Support.
+
 Identification uses a 2-stage pipeline:
   Stage 1 — pHash shortlist
       Compute a 64-bit DCT perceptual hash for the YOLO crop.
@@ -33,6 +35,8 @@ import numpy as np
 from PIL import Image
 
 from champions import Champion, ChampionRoster
+from constants import LANE_ROLES
+from loading_keys import normalize_legacy_thumb_key
 
 
 # ── cache paths ───────────────────────────────────────────────────────────────
@@ -41,6 +45,7 @@ CACHE_DIR    = Path(__file__).parent / "cache"
 THUMB_MATRIX = CACHE_DIR / "thumb_matrix.npy"
 HIST_MATRIX  = CACHE_DIR / "hist_matrix.npy"
 THUMB_INDEX  = CACHE_DIR / "thumb_index.json"
+CHAMP_REG_JSON = CACHE_DIR / "champion_registry.json"
 THUMB_SIZE   = (128, 128)
 
 
@@ -207,6 +212,20 @@ def _orb_score(query_gray: np.ndarray, ref_gray: np.ndarray) -> int:
     return len(bf.match(des1, des2))
 
 
+# ── skin DB key normalization ────────────────────────────────────────────────
+# Older thumb_index rows used stem.split("_")[0] (wrong for Lee_Sin, Dr._Mundo, …).
+# Map to registry keys; display names come from champion_registry.json.
+
+
+def _normalize_skin_db_key_name(
+    key: str, name: str, reg_names: dict[str, str],
+) -> tuple[str, str]:
+    reg_keys = frozenset(reg_names.keys())
+    nk = normalize_legacy_thumb_key(key, reg_keys)
+    nn = reg_names.get(nk, name)
+    return nk, nn
+
+
 # ── skin database ─────────────────────────────────────────────────────────────
 
 class SkinDatabase:
@@ -233,6 +252,21 @@ class SkinDatabase:
         else:
             self._hists = None
             # print("(hist_matrix.npy missing — run rebuild_cache.py)", end=" ")
+
+        self._reg_names: dict[str, str] = {}
+        if CHAMP_REG_JSON.is_file():
+            try:
+                reg = json.loads(CHAMP_REG_JSON.read_text(encoding="utf-8"))
+                if isinstance(reg, dict):
+                    data = reg.get("data", reg)
+                    if isinstance(data, dict):
+                        self._reg_names = {
+                            k: v.get("name", k)
+                            for k, v in data.items()
+                            if isinstance(v, dict)
+                        }
+            except Exception:
+                pass
 
         # print(f"{len(self._keys)} skins ready.")
 
@@ -289,7 +323,9 @@ class SkinDatabase:
                 best_key   = self._keys[idx]
                 best_name  = self._names[idx]
 
-        return best_key, best_name
+        return _normalize_skin_db_key_name(
+            best_key, best_name, self._reg_names,
+        )
 
 
 # ── card cropping ─────────────────────────────────────────────────────────────
@@ -391,14 +427,29 @@ def _run_splash_yolo(screenshot: Image.Image):
     return process_splash_detections(splash_det, name_det, img_w, img_h)
 
 
+def _sort_row_lanes(boxes: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
+    """One team row: left→right = top, jungle, mid, adc, support (max 5 cards)."""
+    row = sorted(boxes, key=lambda b: b[0])
+    if len(row) > 5:
+        row = row[:5]
+    return row
+
+
 def _boxes_to_grid(
     boxes: list[tuple[int,int,int,int]],
     img_h: int,
 ) -> tuple[list[tuple[int,int,int,int]], list[tuple[int,int,int,int]]]:
+    """Split 10 splashes into top/bottom rows; each row sorted by x (lane columns)."""
     mid = img_h // 2
-    top = sorted([b for b in boxes if (b[1]+b[3])//2 < mid], key=lambda b: b[0])
-    bot = sorted([b for b in boxes if (b[1]+b[3])//2 >= mid], key=lambda b: b[0])
+    top = _sort_row_lanes([b for b in boxes if (b[1] + b[3]) // 2 < mid])
+    bot = _sort_row_lanes([b for b in boxes if (b[1] + b[3]) // 2 >= mid])
     return top, bot
+
+
+def _lane_role_for_col(col: int) -> str:
+    if 0 <= col < len(LANE_ROLES):
+        return LANE_ROLES[col]
+    return ""
 
 
 def _gold_score(arr: np.ndarray) -> float:
@@ -427,10 +478,8 @@ def _find_player_from_name_boxes(
     arr  = np.array(screenshot)
     mid  = img_h // 2
 
-    top_names = sorted([b for b in name_boxes if (b[1]+b[3])//2 < mid],
-                       key=lambda b: b[0])
-    bot_names = sorted([b for b in name_boxes if (b[1]+b[3])//2 >= mid],
-                       key=lambda b: b[0])
+    top_names = _sort_row_lanes([b for b in name_boxes if (b[1] + b[3]) // 2 < mid])
+    bot_names = _sort_row_lanes([b for b in name_boxes if (b[1] + b[3]) // 2 >= mid])
 
     best_score = -1
     player_row = player_col = None
@@ -495,8 +544,8 @@ def identify_all(
     name_boxes:   list | None = None,
 ) -> ChampionRoster | None:
     w, h      = screenshot.size
-    debug_dir = Path(__file__).parent / "debug_crops"
-    debug_dir.mkdir(exist_ok=True)
+    # debug_dir = Path(__file__).parent / "debug_crops"
+    # debug_dir.mkdir(exist_ok=True)
 
     def _crop_box(box):
         x1, y1, x2, y2 = box
@@ -504,7 +553,7 @@ def identify_all(
 
     def _identify_box(box, label) -> tuple[str, str]:
         crop = _crop_box(box)
-        crop.save(debug_dir / f"{label}.png")
+        # crop.save(debug_dir / f"{label}.png")
         # print(f"  [{label}]")
         return db.identify(crop)
 
@@ -544,27 +593,34 @@ def identify_all(
             pass  # print("  Incomplete rows — falling back to fixed grid.")
         else:
             p_key, p_name = _identify_box(ally_boxes[player_col], "player")
-            player = Champion(name=p_name, key=p_key, is_player=True)
+            player = Champion(
+                name=p_name,
+                key=p_key,
+                is_player=True,
+                role=_lane_role_for_col(player_col),
+            )
 
             ally_labels, allies, ai = [], [], 0
             for ci, box in enumerate(ally_boxes):
+                role = _lane_role_for_col(ci)
                 if ci == player_col:
                     ally_labels.append((_crop_box(box), f"{p_name} ★"))
                     continue
                 key, name = _identify_box(box, f"ally_{ai}")
-                allies.append(Champion(name=name, key=key))
+                allies.append(Champion(name=name, key=key, role=role))
                 ally_labels.append((_crop_box(box), f"{name}"))
                 ai += 1
 
             enemy_labels, enemies = [], []
             for ci, box in enumerate(enemy_boxes):
+                role = _lane_role_for_col(ci)
                 key, name = _identify_box(box, f"enemy_{ci}")
-                enemies.append(Champion(name=name, key=key))
+                enemies.append(Champion(name=name, key=key, role=role))
                 enemy_labels.append((_crop_box(box), f"{name}"))
 
             top_l = ally_labels  if player_row == 0 else enemy_labels
             bot_l = enemy_labels if player_row == 0 else ally_labels
-            _save_debug_composite(top_l, bot_l, debug_dir / "debug_composite.jpg")
+            # _save_debug_composite(top_l, bot_l, debug_dir / "debug_composite.jpg")
             enemy_side = "red" if side == "blue" else "blue"
             return ChampionRoster(player=player, allies=allies, enemies=enemies,
                                   enemy_side=enemy_side)
@@ -585,34 +641,43 @@ def identify_all(
 
     def _identify_grid(row: int, col: int, label: str) -> tuple[str, str]:
         crop = crop_card(screenshot, row, col)
-        crop.save(debug_dir / f"{label}.png")
+        # crop.save(debug_dir / f"{label}.png")
         return db.identify(crop)
 
     p_key, p_name = _identify_grid(player_row, player_col, "player")
-    player = Champion(name=p_name, key=p_key, is_player=True)
+    player = Champion(
+        name=p_name,
+        key=p_key,
+        is_player=True,
+        role=_lane_role_for_col(player_col),
+    )
 
     ally_labels, allies, ai = [], [], 0
     for col in range(5):
+        role = _lane_role_for_col(col)
         crop = crop_card(screenshot, player_row, col)
         if col == player_col:
             ally_labels.append((crop, f"{p_name} ★"))
             continue
         key, name = _identify_grid(player_row, col, f"ally_{ai}")
-        allies.append(Champion(name=name, key=key))
+        allies.append(Champion(name=name, key=key, role=role))
         ally_labels.append((crop, f"{name}"))
         ai += 1
 
     enemy_labels, enemies = [], []
     for col in range(5):
+        role = _lane_role_for_col(col)
         crop = crop_card(screenshot, enemy_row, col)
         key, name = _identify_grid(enemy_row, col, f"enemy_{col}")
-        enemies.append(Champion(name=name, key=key))
+        enemies.append(Champion(name=name, key=key, role=role))
         enemy_labels.append((crop, f"{name}"))
 
     top_l = ally_labels  if player_row == 0 else enemy_labels
     bot_l = enemy_labels if player_row == 0 else ally_labels
-    _save_debug_composite(top_l, bot_l, debug_dir / "debug_composite.jpg")
-    return ChampionRoster(player=player, allies=allies, enemies=enemies)
+    # _save_debug_composite(top_l, bot_l, debug_dir / "debug_composite.jpg")
+    enemy_side = "red" if side == "blue" else "blue"
+    return ChampionRoster(player=player, allies=allies, enemies=enemies,
+                          enemy_side=enemy_side)
 
 
 # ── entry point ───────────────────────────────────────────────────────────────

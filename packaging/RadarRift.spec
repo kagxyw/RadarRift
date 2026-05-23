@@ -1,13 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 # Build deps: pip install -r requirements-build.txt
 #
-# Run from repository root:
-#   python -m PyInstaller packaging/RadarRift.spec
+# Run from repository root (close dist\RadarRift\RadarRift.exe if it is running):
+#   python -m PyInstaller packaging/RadarRift.spec --noconfirm
 #
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 import os
 import shutil
+import subprocess
+import sys as _sys
 
 _PACK = os.path.dirname(os.path.abspath(SPECPATH))
 
@@ -29,6 +31,19 @@ def _project_root(pack_dir: str) -> str:
 
 
 _ROOT = _project_root(_PACK)
+
+# Export YOLO .pt → ONNX into cache/ when weights are present (requires ultralytics).
+print("--- tools.build_bundle_onnx (optional) ---")
+_bx = subprocess.run(
+    [_sys.executable, "-m", "tools.build_bundle_onnx"],
+    cwd=_ROOT,
+)
+if _bx.returncode != 0:
+    print(
+        "WARNING: ONNX export exited with code %s — cache/ may lack .onnx files.\n"
+        "  Install ultralytics, place .pt in cache/ or train runs/, or add .onnx manually."
+        % (_bx.returncode,)
+    )
 
 # Exclude minimap_yolo11n.pt from the bundled cache — users download it on first run
 _cache_src = os.path.join(_ROOT, "cache")
@@ -66,6 +81,13 @@ for _excl in (
 _assets = os.path.join(_ROOT, "assets")
 
 datas = [(_cache_tmp, "cache")]
+_tts_out = os.path.join(_ROOT, "tts_out")
+if os.path.isdir(_tts_out):
+    datas.append((_tts_out, "tts_out"))
+    print("Bundling tts_out/ (%d mp3)" % len(
+        [f for f in os.listdir(_tts_out) if f.lower().endswith(".mp3")]))
+else:
+    print("WARNING: tts_out/ not found — Read name alerts will need MP3s beside the exe.")
 datas += [
     (os.path.join(_assets, "屏幕截图 2026-03-07 060822.png"), "."),
     (os.path.join(_assets, "arrow_up.svg"), "."),
@@ -118,12 +140,15 @@ a = Analysis(
         "champions",
         "constants",
         "match_start",
+        "loading_keys",
+        "wiki_loading_keys",
         "splash_model",
         "onnx_model",
         "select_minimap",
         "win_lol",
         "ui",
         "app",
+        "alert_audio",
         "PyQt6",
         "PyQt6.QtCore",
         "PyQt6.QtGui",
@@ -135,7 +160,8 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[os.path.join(_PACK, "rthook_onnxruntime.py")],
+    # Anchor to _ROOT — SPECPATH dirname can resolve to repo root on some PyInstaller versions.
+    runtime_hooks=[os.path.join(_ROOT, "packaging", "rthook_onnxruntime.py")],
     excludes=[
         "torch",
         "torchvision",

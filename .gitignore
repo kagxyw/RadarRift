@@ -1,6 +1,7 @@
 # PyInstaller
 dist/
 build/
+RadarRift-win64.zip
 *.spec.bak
 
 # Python
@@ -34,6 +35,7 @@ wandb/
 
 # annotation_tool.py default layout (session/images, session/labels)
 session/
+session_cropped/
 
 # Local YOLO datasets & caches (optional; large)
 # Any root folder whose name starts with "dataset" (dataset, dataset_minimap, …)

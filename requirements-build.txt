@@ -1,6 +1,10 @@
-# PyInstaller build — install runtime deps first, then from repo root:
+# PyInstaller build - install runtime deps first, then from repo root:
 #   pip install -r requirements-build.txt
 #   python -m PyInstaller packaging/RadarRift.spec
+#
+# Export .pt -> .onnx into cache/ before freeze (see tools.build_bundle_onnx):
+#   pip install ultralytics
 
 -r requirements.txt
 PyInstaller>=6.3.0
+ultralytics>=8.3.0

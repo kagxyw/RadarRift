@@ -9,8 +9,8 @@ Providers tried in order:
   1. DmlExecutionProvider   — GPU via DirectML (Windows, any vendor)
   2. CPUExecutionProvider   — CPU fallback
 
-Model files (auto-exported on first use from the .pt files):
-  cache/minimap_yolo11n.onnx   — minimap champion-icon detector
+Model files (auto-exported on first use from the .pt files in dev):
+  cache/champion_yolo11n.onnx  — minimap champion-icon detector (aliases: minimap_yolo11n.onnx, yolo11n.onnx)
   cache/splash_detection.onnx  — loading-screen splash-card detector
 
 Usage:
@@ -18,28 +18,54 @@ Usage:
 
   export_all()   # one-time: converts .pt → .onnx if not already done
 
-  det = OnnxDetector("cache/minimap_yolo11n.onnx", conf=0.26)
+  det = OnnxDetector("cache/champion_yolo11n.onnx", conf=0.26)
   boxes = det.detect(bgr_frame)
   # boxes: list of (x1, y1, x2, y2, confidence, class_id)
 """
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+
+def _frozen() -> bool:
+    return getattr(sys, "frozen", False)
+
+
+# Ultralytics may write a different stem than our target name; accept common aliases.
+_MINIMAP_ONNX_NAMES = (
+    "champion_yolo11n.onnx",
+    "minimap_yolo11n.onnx",
+    "yolo11n.onnx",
+)
+_SPLASH_ONNX_NAMES = ("splash_detection.onnx",)
+
+
+def _onnx_search_roots() -> list[Path]:
+    """Frozen: bundled _internal/cache, then writable cache next to exe. Dev: project cache."""
+    if _frozen():
+        return [
+            Path(sys._MEIPASS) / "cache",
+            Path(sys.executable).resolve().parent / "cache",
+        ]
+    return [Path(__file__).resolve().parent / "cache"]
+
+
 def _bundle_cache() -> Path:
     """Read-only bundled cache (_internal/cache when frozen)."""
-    if getattr(sys, "frozen", False):
+    if _frozen():
         return Path(sys._MEIPASS) / "cache"
     return Path(__file__).parent / "cache"
 
+
 def _user_cache() -> Path:
     """Writable cache next to the exe (for downloaded/exported files)."""
-    if getattr(sys, "frozen", False):
+    if _frozen():
         return Path(sys.executable).parent / "cache"
     return Path(__file__).parent / "cache"
 
@@ -98,19 +124,76 @@ def export_to_onnx(pt_path: Path, onnx_path: Path,
         return True
     if force and onnx_path.exists():
         onnx_path.unlink()
+    if not pt_path.is_file():
+        print(f"  ONNX export skipped — weight file not found: {pt_path}")
+        return False
     try:
         from ultralytics import YOLO
+
         model = YOLO(str(pt_path))
-        model.export(format="onnx", imgsz=imgsz, simplify=True, opset=12)
-        # Ultralytics writes <pt_stem>.onnx next to the .pt file
-        exported = pt_path.with_suffix(".onnx")
-        if exported.exists():
-            if exported.resolve() != onnx_path.resolve():
-                exported.rename(onnx_path)
-            return True
+        out = model.export(format="onnx", imgsz=imgsz, simplify=True, opset=12)
+        exported = Path(out)
+        if not exported.is_file():
+            # Fallback: same-dir stem (older Ultralytics)
+            alt = pt_path.with_suffix(".onnx")
+            exported = alt if alt.is_file() else exported
+        if not exported.is_file():
+            print(f"  ONNX export failed — output not found (expected near {pt_path})")
+            return False
+        onnx_path.parent.mkdir(parents=True, exist_ok=True)
+        if exported.resolve() != onnx_path.resolve():
+            if onnx_path.exists():
+                onnx_path.unlink()
+            shutil.move(str(exported), str(onnx_path))
+        return True
     except Exception as e:
         print(f"  ONNX export failed for {pt_path.name}: {e}")
     return False
+
+
+def resolve_minimap_onnx_path() -> Path:
+    """Bundled cache, exe-adjacent cache, then dev export from .pt."""
+    for root in _onnx_search_roots():
+        for name in _MINIMAP_ONNX_NAMES:
+            p = root / name
+            if p.is_file():
+                return p
+    if not _frozen():
+        if MINIMAP_PT.is_file():
+            export_to_onnx(MINIMAP_PT, MINIMAP_ONNX, imgsz=320)
+        for root in _onnx_search_roots():
+            for name in _MINIMAP_ONNX_NAMES:
+                p = root / name
+                if p.is_file():
+                    return p
+    searched = [str(root / n) for root in _onnx_search_roots() for n in _MINIMAP_ONNX_NAMES]
+    raise FileNotFoundError(
+        "Minimap ONNX model not found. Expected one of "
+        f"{_MINIMAP_ONNX_NAMES} under the cache folder (next to the .exe or inside the app bundle). "
+        "Rebuild PyInstaller with .onnx files in project cache/, or copy the file into the "
+        f"cache folder beside the executable. Checked: {searched!s}"
+    )
+
+
+def resolve_splash_onnx_path() -> Path:
+    for root in _onnx_search_roots():
+        for name in _SPLASH_ONNX_NAMES:
+            p = root / name
+            if p.is_file():
+                return p
+    if not _frozen():
+        if SPLASH_PT.is_file():
+            export_to_onnx(SPLASH_PT, SPLASH_ONNX, imgsz=1920)
+        for root in _onnx_search_roots():
+            for name in _SPLASH_ONNX_NAMES:
+                p = root / name
+                if p.is_file():
+                    return p
+    searched = [str(root / n) for root in _onnx_search_roots() for n in _SPLASH_ONNX_NAMES]
+    raise FileNotFoundError(
+        "Splash ONNX model not found. Expected splash_detection.onnx under cache. "
+        f"Checked: {searched!s}"
+    )
 
 
 def export_all(force: bool = False) -> dict[str, bool]:
@@ -128,7 +211,7 @@ def export_all(force: bool = False) -> dict[str, bool]:
         if not pt.exists():
             results[pt.name] = False
             continue
-        results[pt.name] = export_to_onnx(pt, onnx, imgsz=imgsz, force=force)
+        results[pt.name] = export_to_onnx(pt, onnx)
     return results
 
 
@@ -266,17 +349,13 @@ class OnnxDetector:
 # ── Convenience loaders ───────────────────────────────────────────────────────
 
 def load_minimap_detector(conf: float = 0.26) -> OnnxDetector:
-    """Load the minimap champion-icon detector. Exports .pt → .onnx if needed."""
-    if not MINIMAP_ONNX.exists():
-        export_to_onnx(MINIMAP_PT, MINIMAP_ONNX)
-    return OnnxDetector(MINIMAP_ONNX, conf=conf)
+    """Load the minimap champion-icon detector. Exports .pt → .onnx in dev if needed."""
+    return OnnxDetector(resolve_minimap_onnx_path(), conf=conf)
 
 
 def load_splash_detector(conf: float = 0.40) -> OnnxDetector:
-    """Load the loading-screen splash-card detector. Exports .pt → .onnx if needed."""
-    if not SPLASH_ONNX.exists():
-        export_to_onnx(SPLASH_PT, SPLASH_ONNX)
-    return OnnxDetector(SPLASH_ONNX, conf=conf)
+    """Load the loading-screen splash-card detector. Exports .pt → .onnx in dev if needed."""
+    return OnnxDetector(resolve_splash_onnx_path(), conf=conf)
 
 
 # ── PyTorch-compatible interface (drop-in for yolo_model / splash_model) ──────
@@ -292,9 +371,9 @@ def load_model() -> OnnxDetector:
     """Load minimap detector — drop-in for yolo_model.load_model()."""
     global _minimap_det
     if _minimap_det is None:
-        if not MINIMAP_ONNX.exists():
-            export_to_onnx(MINIMAP_PT, MINIMAP_ONNX)
-        _minimap_det = OnnxDetector(MINIMAP_ONNX, conf=0.26, imgsz=320)
+        _minimap_det = OnnxDetector(
+            resolve_minimap_onnx_path(), conf=0.26, imgsz=320,
+        )
     return _minimap_det
 
 
@@ -323,10 +402,16 @@ def load_splash_model() -> OnnxDetector:
     """Load splash detector — drop-in for splash_model.load_model()."""
     global _splash_det
     if _splash_det is None:
-        if not SPLASH_ONNX.exists():
-            export_to_onnx(SPLASH_PT, SPLASH_ONNX)
-        _splash_det = OnnxDetector(SPLASH_ONNX, conf=0.35, imgsz=1920)
+        _splash_det = OnnxDetector(
+            resolve_splash_onnx_path(), conf=0.35, imgsz=1920,
+        )
     return _splash_det
+
+
+def unload_splash_model() -> None:
+    """Drop splash ONNX session (e.g. after loading-screen scan window ends)."""
+    global _splash_det
+    _splash_det = None
 
 
 def detect_cards(

@@ -20,6 +20,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from constants import BOT_LANE_ROLES, LANE_ROLE_LABELS, LANE_ROLES, normalize_lane_role
+
 
 # ── status constants ─────────────────────────────────────────────────────────
 
@@ -32,12 +34,169 @@ CACHE_DIR = _CACHE_ROOT
 
 # ── data structures ───────────────────────────────────────────────────────────
 
+def should_alert_for_role(player_role: str, enemy_role: str) -> bool:
+    """
+    Radius-alert role filter.
+    - Skip same role as player.
+    - If player is adc or support, skip both enemy adc and support (bot lane).
+    Unknown/empty roles do not suppress alerts.
+    """
+    pr = normalize_lane_role(player_role)
+    er = normalize_lane_role(enemy_role)
+    if not pr or not er:
+        return True
+    if pr not in LANE_ROLES or er not in LANE_ROLES:
+        return True
+    if pr == er:
+        return False
+    if pr in BOT_LANE_ROLES and er in BOT_LANE_ROLES:
+        return False
+    return True
+
+
+def lane_role_label(role: str) -> str:
+    """'mid' → 'Mid'; unknown → ''."""
+    r = normalize_lane_role(role)
+    if r in LANE_ROLES:
+        return LANE_ROLE_LABELS[LANE_ROLES.index(r)]
+    return ""
+
+
+def sort_champions_by_lane(champs: list[Champion]) -> list[Champion]:
+    """Order champions top → support; unknown roles last."""
+    def _key(c: Champion) -> tuple[int, str]:
+        r = (c.role or "").strip().lower()
+        if r in LANE_ROLES:
+            return (LANE_ROLES.index(r), c.name)
+        return (len(LANE_ROLES), c.name)
+
+    return sorted(champs, key=_key)
+
+
+def _role_key(c: Champion) -> str:
+    return normalize_lane_role(c.role)
+
+
+def champion_filled(c: Champion | None) -> bool:
+    """True if this roster slot has a champion name or key."""
+    if c is None:
+        return False
+    return bool((c.key or c.name or "").strip())
+
+
+def team_lane_slots(
+    player: Champion,
+    allies: list[Champion],
+) -> list[tuple[str, Champion | None, bool]]:
+    """
+    Your team in loading-screen column order (top → support).
+    Returns (role_id, champion_or_none, is_local_player) × 5.
+    """
+    slots: dict[str, Champion | None] = {r: None for r in LANE_ROLES}
+
+    for c in allies:
+        r = _role_key(c)
+        if r in LANE_ROLES and slots[r] is None:
+            slots[r] = c
+
+    pr = _role_key(player)
+    if pr in LANE_ROLES and champion_filled(player):
+        slots[pr] = player
+
+    unroled = [c for c in allies if _role_key(c) not in LANE_ROLES]
+    for r in LANE_ROLES:
+        if slots[r] is not None:
+            continue
+        if r == pr and champion_filled(player):
+            slots[r] = player
+        elif unroled:
+            slots[r] = unroled.pop(0)
+
+    if champion_filled(player) and not any(
+        slots[r] is not None and slots[r].key == player.key for r in LANE_ROLES
+    ):
+        for r in LANE_ROLES:
+            if slots[r] is None:
+                slots[r] = player
+                break
+
+    out: list[tuple[str, Champion | None, bool]] = []
+    for r in LANE_ROLES:
+        c = slots[r]
+        is_pl = (
+            champion_filled(c)
+            and champion_filled(player)
+            and c.key == player.key
+        )
+        out.append((r, c, is_pl))
+    return out
+
+
+def enemy_lane_slots(
+    enemies: list[Champion],
+) -> list[tuple[str, Champion | None]]:
+    """Enemy row in column order (top → support)."""
+    slots: dict[str, Champion | None] = {r: None for r in LANE_ROLES}
+
+    for c in enemies:
+        r = _role_key(c)
+        if r in LANE_ROLES and slots[r] is None:
+            slots[r] = c
+
+    unroled = [c for c in enemies if _role_key(c) not in LANE_ROLES]
+    for r in LANE_ROLES:
+        if slots[r] is None and unroled:
+            slots[r] = unroled.pop(0)
+
+    return [(r, slots[r]) for r in LANE_ROLES]
+
+
+def normalize_roster(roster: "ChampionRoster") -> "ChampionRoster":
+    """Align player/allies/enemies to lane columns with roles filled in."""
+    player = roster.player
+    allies_out: list[Champion] = []
+
+    for role, c, is_pl in team_lane_slots(roster.player, roster.allies):
+        if not champion_filled(c):
+            continue
+        ch = Champion(
+            name=c.name,
+            key=c.key,
+            role=role,
+            is_player=is_pl,
+            status=c.status,
+        )
+        if is_pl:
+            player = ch
+        else:
+            allies_out.append(ch)
+
+    enemies_out: list[Champion] = []
+    for role, c in enemy_lane_slots(roster.enemies):
+        if not champion_filled(c):
+            continue
+        enemies_out.append(Champion(
+            name=c.name,
+            key=c.key,
+            role=role,
+            status=c.status,
+        ))
+
+    return ChampionRoster(
+        player=player,
+        allies=allies_out,
+        enemies=enemies_out,
+        enemy_side=roster.enemy_side,
+    )
+
+
 @dataclass
 class Champion:
     name: str           # display name, e.g. "Miss Fortune"
     key: str            # id key, e.g. "MissFortune" (matches cache filenames)
     is_player: bool = False
     status: int = STATUS_OFF_MAP
+    role: str = ""      # top | jungle | mid | adc | support
 
     def __repr__(self) -> str:
         tag = "PLAYER" if self.is_player else ("ON " if self.status == STATUS_ON_MAP else "off")

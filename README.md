@@ -37,12 +37,4 @@ Python **3.10+**, Windows.
 1. `pip install -r requirements-build.txt`
 2. From the repo root: `python -m PyInstaller packaging/RadarRift.spec`
 
-Output folder: **`dist/RadarRift/`**. Spec and ONNX runtime hook live under **`packaging/`**; bundled images and SVGs live under **`assets/`**.
-
-### Maintenance CLIs *(from repo root)*
-
-| Command | Purpose |
-|--------|---------|
-| `python -m tools.rebuild_cache` | Download skins/icons and rebuild identification matrices into `cache/` |
-| `python -m tools.remake_onnx` | Export `.onnx` from Ultralytics `.pt` weights in `cache/` |
-| `python -m tools.annotation_tool` | Tk minimap labelling UI (optional `path/to/images/train`) |
+Output folder: **`dist/RadarRift/`**.

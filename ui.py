@@ -41,7 +41,8 @@ class SectionHeader(QWidget):
 
 
 class RosterRow(QWidget):
-    def __init__(self, name: str, name_color: str, parent=None):
+    def __init__(self, name: str, name_color: str, role_label: str = "",
+                 parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -50,6 +51,12 @@ class RosterRow(QWidget):
         self.dot = QLabel("○")
         self.dot.setFixedWidth(18)
         self.dot.setStyleSheet(f"color: {DIM}; font-size: 12px;")
+
+        self.role_lbl = QLabel(role_label or "—")
+        self.role_lbl.setFixedWidth(56)
+        self.role_lbl.setStyleSheet(
+            f"color: {DIM}; font-size: 11px; font-weight: bold;")
+        layout.addWidget(self.role_lbl)
 
         self.name_lbl = QLabel(name)
         self.name_lbl.setStyleSheet(f"color: {name_color}; font-size: 13px;")
@@ -216,8 +223,8 @@ class AppWindow(QWidget):
         fps_label.setToolTip("Target cap for minimap inference / tracking loop.")
 
         self.fps_combo = QComboBox()
-        self.fps_combo.addItems(["1", "5", "15", "30", "Unlimited"])
-        self.fps_combo.setCurrentText("30")
+        self.fps_combo.addItems(["1", "3", "5", "10", "15", "Unlimited"])
+        self.fps_combo.setCurrentText("5")
         self.fps_combo.setFixedWidth(100)
         self.fps_combo.setToolTip("Maximum frames per second for processing the minimap region.")
 
@@ -266,36 +273,39 @@ class AppWindow(QWidget):
         root.addWidget(cap_row)
         root.addWidget(self.region_lbl)
 
-        death_row = QWidget()
-        dl = QHBoxLayout(death_row)
-        dl.setContentsMargins(0, 0, 0, 0)
-        dl.setSpacing(6)
-
-        death_btn = QPushButton("⊡  Death Strip")
-        death_btn.setStyleSheet("background: #585b70; color: #cdd6f4;")
-        death_btn.clicked.connect(self._select_death_region)
-        death_btn.setToolTip(
-            "Fullscreen drag overlay: draw the strip where the death recap / timer appears. "
-            "Used when death-panel scanning is enabled.",
-        )
-
-        auto_btn = QPushButton("Auto")
-        auto_btn.setStyleSheet("background: #45475a; color: #cdd6f4;")
-        auto_btn.clicked.connect(self._auto_death_region)
-        auto_btn.setToolTip(
-            "Clear manual death strip and derive its position from the current minimap region "
-            "(built-in layout offset).",
-        )
-
-        self.death_region_lbl = QLabel("pending minimap region…")
-        self.death_region_lbl.setStyleSheet(f"color: {DIM}; font-size: 12px;")
-        self.death_region_lbl.setToolTip("Death-strip capture area: size and position.")
-
-        dl.addWidget(death_btn)
-        dl.addWidget(auto_btn)
-        dl.addWidget(self.death_region_lbl, 1)
-
-        root.addWidget(death_row)
+        # Death strip UI (disabled — scanning commented out in app infer loop)
+        # death_row = QWidget()
+        # dl = QHBoxLayout(death_row)
+        # dl.setContentsMargins(0, 0, 0, 0)
+        # dl.setSpacing(6)
+        #
+        # death_btn = QPushButton("⊡  Death Strip")
+        # death_btn.setStyleSheet("background: #585b70; color: #cdd6f4;")
+        # death_btn.clicked.connect(self._select_death_region)
+        # death_btn.setToolTip(
+        #     "Fullscreen drag overlay: draw the strip where the death recap / timer appears. "
+        #     "Used when death-panel scanning is enabled.",
+        # )
+        #
+        # auto_btn = QPushButton("Auto")
+        # auto_btn.setStyleSheet("background: #45475a; color: #cdd6f4;")
+        # auto_btn.clicked.connect(self._auto_death_region)
+        # auto_btn.setToolTip(
+        #     "Clear manual death strip and derive its position from the current minimap region "
+        #     "(built-in layout offset).",
+        # )
+        #
+        # self.death_region_lbl = QLabel("pending minimap region…")
+        # self.death_region_lbl.setStyleSheet(f"color: {DIM}; font-size: 12px;")
+        # self.death_region_lbl.setToolTip("Death-strip capture area: size and position.")
+        #
+        # dl.addWidget(death_btn)
+        # dl.addWidget(auto_btn)
+        # dl.addWidget(self.death_region_lbl, 1)
+        #
+        # root.addWidget(death_row)
+        self.death_region_lbl = QLabel()
+        self.death_region_lbl.hide()
         root.addWidget(self._make_sep())
 
         # ── alert ─────────────────────────────────────────────────
@@ -324,6 +334,25 @@ class AppWindow(QWidget):
 
         root.addWidget(radius_row)
 
+        alert_type_row = QWidget()
+        atl = QHBoxLayout(alert_type_row)
+        atl.setContentsMargins(0, 0, 0, 0)
+        atl.setSpacing(8)
+        _at_lbl = QLabel("Alert:")
+        _at_lbl.setStyleSheet(f"color: {DIM};")
+        _at_lbl.setToolTip("Custom ping plays one sound file; Read name speaks the enemy champion.")
+        self.alert_mode_combo = QComboBox()
+        self.alert_mode_combo.addItem("Read name", "name")
+        self.alert_mode_combo.addItem("Custom ping", "ping")
+        self.alert_mode_combo.setCurrentIndex(0)
+        self.alert_mode_combo.setToolTip(
+            "Custom ping: your chosen sound file.\n"
+            "Read name: pre-generated MP3 from tools/tts_out (1.5× speed).",
+        )
+        atl.addWidget(_at_lbl)
+        atl.addWidget(self.alert_mode_combo, 1)
+        root.addWidget(alert_type_row)
+
         sound_row = QWidget()
         sl = QHBoxLayout(sound_row)
         sl.setContentsMargins(0, 0, 0, 0)
@@ -332,8 +361,9 @@ class AppWindow(QWidget):
         sound_btn = QPushButton("♪  Sound")
         sound_btn.setStyleSheet("background: #89dceb; color: #1e1e2e;")
         sound_btn.clicked.connect(self._pick_alert_sound)
-        sound_btn.setToolTip("Choose a WAV (or compatible) file played when the alert radius triggers.")
+        sound_btn.setToolTip("Choose a WAV/MP3 played when alert mode is Custom ping.")
 
+        self._sound_btn = sound_btn
         self._sound_lbl = QLabel("need file")
         self._sound_lbl.setStyleSheet(f"color: {DIM}; font-size: 12px;")
         self._sound_lbl.setToolTip("Filename of the current alert sound.")
@@ -394,6 +424,27 @@ class AppWindow(QWidget):
 
         cl.addSpacing(12)
 
+        _mute_lbl = QLabel("Mute after on map:")
+        _mute_lbl.setToolTip(
+            "After an enemy is on the minimap this many seconds, radius alerts "
+            "stop. They can alert again only after 10s off the minimap. "
+            "Full reset on new match / roster. 0 = off.",
+        )
+        cl.addWidget(_mute_lbl)
+        self.alert_mute_on_map_spin = QDoubleSpinBox()
+        self.alert_mute_on_map_spin.setRange(0.0, 300.0)
+        self.alert_mute_on_map_spin.setSingleStep(5.0)
+        self.alert_mute_on_map_spin.setValue(15.0)
+        self.alert_mute_on_map_spin.setFixedWidth(80)
+        self.alert_mute_on_map_spin.setToolTip(
+            "Seconds on minimap before muted. Then they need 10s off-map before "
+            "radius alerts work again.",
+        )
+        cl.addWidget(self.alert_mute_on_map_spin)
+        cl.addWidget(QLabel("s"))
+
+        cl.addSpacing(12)
+
         _off_lbl = QLabel("Draw marker after:")
         _off_lbl.setToolTip(
             "Seconds without seeing a champion on the minimap before showing off-map ghost marker.",
@@ -402,7 +453,7 @@ class AppWindow(QWidget):
         self.off_timeout_spin = QDoubleSpinBox()
         self.off_timeout_spin.setRange(0.5, 60.0)
         self.off_timeout_spin.setSingleStep(0.5)
-        self.off_timeout_spin.setValue(5.0)
+        self.off_timeout_spin.setValue(1.0)
         self.off_timeout_spin.setFixedWidth(80)
         self.off_timeout_spin.setToolTip(
             "Off-map / ghost overlay timing: higher = wait longer before treating as missing.",
@@ -606,6 +657,7 @@ class AppWindow(QWidget):
             widget = item.widget()
             child_layout = item.layout()
             if widget is not None:
+                widget.setParent(None)
                 widget.deleteLater()
             elif child_layout is not None:
                 self._clear_layout(child_layout)
@@ -613,6 +665,8 @@ class AppWindow(QWidget):
     def _build_roster_display(self) -> None:
         self._clear_layout(self._roster_layout)
         self._roster_widgets.clear()
+        if hasattr(self, "_form_btn_map"):
+            self._form_btn_map.clear()
 
         if not self.roster:
             lbl = QLabel("No champions loaded yet.")
@@ -621,20 +675,40 @@ class AppWindow(QWidget):
             self._roster_layout.addStretch(1)
             return
 
-        def add_section(title: str, champs, name_color: str):
+        from champions import (
+            champion_filled,
+            enemy_lane_slots,
+            lane_role_label,
+            team_lane_slots,
+        )
+
+        def add_lane_rows(title: str, rows: list):
             hdr = QLabel(title)
             hdr.setStyleSheet(f"color: {DIM}; font-size: 11px; font-weight: bold;")
             self._roster_layout.addWidget(hdr)
-
-            for c in champs:
-                row = RosterRow(c.name, name_color)
+            for role, c, display_name, name_color in rows:
+                row = RosterRow(display_name, name_color, lane_role_label(role))
                 self._roster_layout.addWidget(row)
-                self._roster_widgets[c.name] = row
+                self._roster_widgets[c.key] = row
                 self._after_roster_row(c, row)
 
-        add_section("— Player", [self.roster.player], "#f9e2af")
-        add_section("— Allies", self.roster.allies, ALLY)
-        add_section("— Enemies", self.roster.enemies, ENE)
+        team_rows = []
+        for role, c, is_pl in team_lane_slots(
+                self.roster.player, self.roster.allies):
+            if not champion_filled(c):
+                continue
+            color = "#f9e2af" if is_pl else ALLY
+            label = c.name + (" ★" if is_pl else "")
+            team_rows.append((role, c, label, color))
+
+        enemy_rows = []
+        for role, c in enemy_lane_slots(self.roster.enemies):
+            if not champion_filled(c):
+                continue
+            enemy_rows.append((role, c, c.name, ENE))
+
+        add_lane_rows("— Your team", team_rows)
+        add_lane_rows("— Enemies", enemy_rows)
         self._roster_layout.addStretch(1)
 
     def _after_roster_row(self, c, row) -> None:
@@ -647,7 +721,7 @@ class AppWindow(QWidget):
         from champions import STATUS_ON_MAP
 
         for c in [self.roster.player] + self.roster.allies + self.roster.enemies:
-            row = self._roster_widgets.get(c.name)
+            row = self._roster_widgets.get(c.key)
             if row is None:
                 continue
             row.set_on_map(c.status == STATUS_ON_MAP)

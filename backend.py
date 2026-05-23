@@ -45,6 +45,13 @@ def load_splash_model():
     return _f()
 
 
+def unload_splash_model():
+    if USE_ONNX:
+        from onnx_model import unload_splash_model as _f
+        _f()
+    # PyTorch splash_model has no separate unload; GC handles it when ref dropped.
+
+
 def detect_cards(model, screenshot, conf=0.35, max_det=50):
     """Returns (splash_boxes, name_boxes) — top-10 each."""
     if USE_ONNX:

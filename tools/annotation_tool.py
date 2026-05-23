@@ -4,12 +4,17 @@ Minimap Annotation Tool
 Keyboard:
   A / 1        - set class: ally  (green)
   E / 2        - set class: enemy (red)
-  M / 5        - set class: map (minimap bounds / terrain)
+  T / 3        - set class: teleport
+  R / 4        - set class: recall
+  C / 5        - set class: champion_icon
   Left / Right - previous / next image
   Z            - undo last box
   Del          - delete selected box (click to select first)
   S / Ctrl+S   - save labels
   Ctrl+Z       - undo
+
+NOTE: drawing an ally or enemy box automatically also adds a champion_icon
+      box at the same position (same-domain co-label for the champion model).
 
 Run (from repo root):
   1. Put PNG/JPG screenshots in:  session/images/
@@ -46,7 +51,10 @@ else:
 LABEL_DIR.mkdir(parents=True, exist_ok=True)
 IMG_DIR.mkdir(parents=True, exist_ok=True)
 
-_DEFAULT_CLASSES = ["ally", "enemy", "teleport", "recall", "map"]
+_DEFAULT_CLASSES = ["ally", "enemy", "teleport", "recall", "champion_icon"]
+
+# Classes that automatically also emit a champion_icon co-label when drawn
+_CHAMPION_CO_LABEL_CLASSES = {"ally", "enemy"}
 
 
 def _load_classes_from_yaml(split_path: Path):
@@ -58,9 +66,11 @@ def _load_classes_from_yaml(split_path: Path):
             text = yaml_path.read_text()
             names = re.findall(r"^\s*-\s*(\S+)", text, re.MULTILINE)
             if names:
-                for extra in ("teleport", "recall", "map"):
+                for extra in ("teleport", "recall", "champion_icon"):
                     if extra not in names:
                         names.append(extra)
+                # drop legacy map class if present
+                names = [n for n in names if n != "map"]
                 return names
     return list(_DEFAULT_CLASSES)
 
@@ -84,7 +94,11 @@ _PALETTE = [
     "#ffff44",
 ]
 COLORS = {i: _PALETTE[i % len(_PALETTE)] for i in range(len(CLASSES))}
-DISPLAY_SZ = 768
+
+# Canvas grows to fit each image (aspect ratio kept); capped by screen minus UI chrome.
+_CANVAS_MARGIN_X = 80
+_CANVAS_MARGIN_Y = 280
+_CANVAS_MIN_W, _CANVAS_MIN_H = 320, 240
 
 HELP_BODY = """QUICK START
 1. Put your minimap screenshots in the images folder (see path in the title bar).
@@ -94,20 +108,23 @@ HELP_BODY = """QUICK START
 5. Use Next / Prev to move between images (each image has its own .txt file).
 
 WHAT EACH LABEL MEANS
-• Ally      — friendly champion icon on the minimap
-• Enemy     — enemy champion icon
-• Teleport  — teleport animation / icon / beam on minimap (if you are training that)
-• Recall    — recall channel / animation on minimap (if you are training that)
-• Map       — minimap panel / playable area bounds (full map ROI or mask region)
+• Ally          — friendly champion dot on the minimap
+• Enemy         — enemy champion dot on the minimap
+• Teleport      — teleport animation / icon / beam on minimap
+• Recall        — recall channel / animation on minimap
+• Champion Icon — champion portrait icon (auto-added for every ally/enemy box)
+
+NOTE: Every time you draw an Ally or Enemy box, a Champion Icon box is
+automatically added at the same position so both models get trained at once.
 
 MOUSE
-• Left drag     — draw a new box (uses the selected label)
-• Left click    — select a box (thick dashed outline)
+• Left drag     — draw a new box (uses the selected label). You can overlap boxes or draw inside another.
+• Left click    — release without dragging: select the topmost box under the cursor (thick dashed outline)
 • Right click   — delete the box under the cursor
 
 KEYBOARD
-• 1–9           — select label class 1–9 (defaults: 1–5 = ally, enemy, teleport, recall, map)
-• A — Ally   E — Enemy   T — Teleport   R — Recall   M — Map
+• 1–9           — select label class 1–9 (defaults: 1–5 = ally, enemy, teleport, recall, champion_icon)
+• A — Ally   E — Enemy   T — Teleport   R — Recall   C — Champion Icon
 • Left / Right  — previous / next image (auto-saves current first)
 • S, Ctrl+S     — save labels for this image
 • Z, Ctrl+Z     — undo last box
@@ -170,11 +187,18 @@ class AnnotationTool:
         self.idx = 0
         self.boxes = []
         self.sel = -1
-        self.cur_class = 0
+        # cur_team: 0=ally, 1=enemy  (always required)
+        # cur_effect: None | 2=teleport | 3=recall  (optional)
+        self.cur_team = 0
+        self.cur_effect = None
+        self._last_draw_count = 0   # boxes emitted by last draw, for undo grouping
         self.drag_start = None
         self.drag_rect = None
+        self._press_hit = -1
         self.tk_img = None
         self.img_w = self.img_h = 1
+        self.disp_w = 640
+        self.disp_h = 480
 
         self._build_ui()
         self._bind_keys()
@@ -262,8 +286,8 @@ class AnnotationTool:
 
         self.canvas = tk.Canvas(
             self.root,
-            width=DISPLAY_SZ,
-            height=DISPLAY_SZ,
+            width=self.disp_w,
+            height=self.disp_h,
             bg="#000010",
             highlightthickness=0,
             cursor="crosshair",
@@ -273,39 +297,58 @@ class AnnotationTool:
         bot = tk.Frame(self.root, bg=BG)
         bot.pack(fill="x", padx=10, pady=(0, 6))
 
-        tk.Label(
-            bot,
-            text="Label (next box you draw):",
-            bg=BG,
-            fg="#8888aa",
-            font=("Segoe UI", 9),
-        ).pack(anchor="w")
+        # ── Row 1: Team (required, mutually exclusive) ────────────────────────
+        team_frame = tk.Frame(self.root, bg=BG)
+        team_frame.pack(fill="x", padx=10, pady=(2, 0))
+        tk.Label(team_frame, text="Team:", bg=BG, fg="#8888aa",
+                 font=("Segoe UI", 9, "bold"), width=7, anchor="w").pack(side="left")
 
-        btn_row = tk.Frame(self.root, bg=BG)
-        btn_row.pack(fill="x", padx=10, pady=(0, 4))
-
-        self._class_btns = []
-        for i, cname in enumerate(CLASSES):
-            color = COLORS[i]
-            hotkey = str(i + 1) if i < 9 else ""
-            label = f"{cname.replace('_', ' ').title()}"
-            if hotkey:
-                label = f"{label} [{hotkey}]"
+        self._team_btns = []
+        team_defs = [
+            (0, "ally",  "#22dd44", "A"),
+            (1, "enemy", "#dd2244", "E"),
+        ]
+        for tidx, tname, tcolor, tkey in team_defs:
             btn = tk.Button(
-                btn_row,
-                text=label,
-                command=lambda c=i: self._set_class(c),
-                bg="#1a1a2e",
-                fg=color,
+                team_frame,
+                text=f"{'✔  ' if tidx == 0 else '    '}{tname.title()}  [{tkey}]",
+                command=lambda t=tidx: self._set_team(t),
+                bg="#1a1a2e", fg=tcolor,
                 activebackground="#333355",
-                font=("Segoe UI", 9, "bold"),
-                relief="flat",
-                bd=0,
-                padx=8,
-                pady=4,
+                font=("Segoe UI", 10, "bold"),
+                relief="flat", bd=0, padx=10, pady=5,
             )
-            btn.pack(side="left", padx=(0, 6))
-            self._class_btns.append(btn)
+            btn.pack(side="left", padx=(0, 8))
+            self._team_btns.append(btn)
+
+        # champion_icon is always emitted — show as static badge
+        tk.Label(team_frame, text="+ champion_icon  (always)",
+                 bg=BG, fg="#44ffee", font=("Segoe UI", 9, "italic")).pack(side="left", padx=(16, 0))
+
+        # ── Row 2: Effect (optional, mutually exclusive) ──────────────────────
+        eff_frame = tk.Frame(self.root, bg=BG)
+        eff_frame.pack(fill="x", padx=10, pady=(4, 2))
+        tk.Label(eff_frame, text="Effect:", bg=BG, fg="#8888aa",
+                 font=("Segoe UI", 9, "bold"), width=7, anchor="w").pack(side="left")
+
+        self._effect_btns = []
+        effect_defs = [
+            (None,  "none",      "#666688", "N"),
+            (2,     "teleport",  "#ffcc00", "T"),
+            (3,     "recall",    "#aa66ff", "R"),
+        ]
+        for eidx, ename, ecolor, ekey in effect_defs:
+            btn = tk.Button(
+                eff_frame,
+                text=f"{'✔  ' if eidx is None else '    '}{ename.title()}  [{ekey}]",
+                command=lambda ef=eidx: self._set_effect(ef),
+                bg="#1a1a2e", fg=ecolor,
+                activebackground="#333355",
+                font=("Segoe UI", 10, "bold"),
+                relief="flat", bd=0, padx=10, pady=5,
+            )
+            btn.pack(side="left", padx=(0, 8))
+            self._effect_btns.append(btn)
 
         nav = tk.Frame(self.root, bg=BG)
         nav.pack(fill="x", padx=10, pady=(4, 6))
@@ -353,30 +396,79 @@ class AnnotationTool:
         ).pack(side="right")
 
         self.lbl_class = tk.Label(
-            nav, text="", bg=BG, font=("Segoe UI", 11, "bold")
+            nav, text="", bg=BG, font=("Segoe UI", 10, "bold")
         )
         self.lbl_class.pack(side="left", padx=(16, 0))
 
-        hint = tk.Label(
+        self._hint_lbl = tk.Label(
             self.root,
             text=(
-                "Drag = new box  •  Click box = select  •  Right-click = delete  •  "
-                "S = save  •  ← → = prev/next image  •  Help menu for full guide"
+                "Drag = new box  •  Click = select  •  Right-click = delete  •  "
+                "S = save  •  ← → = prev/next  •  Z = undo"
             ),
             bg=BG,
-            fg="#666688",
+            fg="#555577",
             font=("Segoe UI", 9),
-            wraplength=DISPLAY_SZ + 40,
+            wraplength=self.disp_w + 40,
             justify="center",
         )
-        hint.pack(pady=(0, 8))
+        self._hint_lbl.pack(pady=(0, 2))
+
+        # ── Status bar: all options shown with live ✔/○ per selection ──────
+        status_frame = tk.Frame(self.root, bg="#0d0d1a", pady=6)
+        status_frame.pack(fill="x", padx=0, pady=(0, 0))
+
+        tk.Label(status_frame, text="Will draw:", bg="#0d0d1a",
+                 fg="#555577", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(10, 8))
+
+        # separator helper
+        def _sep():
+            tk.Label(status_frame, text="|", bg="#0d0d1a",
+                     fg="#333355", font=("Segoe UI", 11)).pack(side="left", padx=(4, 8))
+
+        # champion_icon — always active, static
+        self._chip_champion = tk.Label(
+            status_frame, text="✔  champion_icon",
+            bg="#0d2a2a", fg="#44ffee", font=("Segoe UI", 10, "bold"), padx=8, pady=3)
+        self._chip_champion.pack(side="left", padx=(0, 4))
+
+        _sep()
+
+        # team chips
+        self._chip_ally = tk.Label(
+            status_frame, text="", bg="#0d0d1a", fg="#22dd44",
+            font=("Segoe UI", 10, "bold"), padx=8, pady=3)
+        self._chip_ally.pack(side="left", padx=(0, 4))
+
+        self._chip_enemy = tk.Label(
+            status_frame, text="", bg="#0d0d1a", fg="#dd2244",
+            font=("Segoe UI", 10, "bold"), padx=8, pady=3)
+        self._chip_enemy.pack(side="left", padx=(0, 4))
+
+        _sep()
+
+        # effect chips
+        self._chip_none = tk.Label(
+            status_frame, text="", bg="#0d0d1a", fg="#555577",
+            font=("Segoe UI", 10, "bold"), padx=8, pady=3)
+        self._chip_none.pack(side="left", padx=(0, 4))
+
+        self._chip_teleport = tk.Label(
+            status_frame, text="", bg="#0d0d1a", fg="#ffcc00",
+            font=("Segoe UI", 10, "bold"), padx=8, pady=3)
+        self._chip_teleport.pack(side="left", padx=(0, 4))
+
+        self._chip_recall = tk.Label(
+            status_frame, text="", bg="#0d0d1a", fg="#aa66ff",
+            font=("Segoe UI", 10, "bold"), padx=8, pady=3)
+        self._chip_recall.pack(side="left", padx=(0, 4))
 
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.canvas.bind("<Button-3>", self._on_right_click)
 
-        self._update_class_ui()
+        self._update_ui()
 
     def _open_images_folder(self):
         import os
@@ -395,34 +487,42 @@ class AnnotationTool:
         self.root.bind("<Left>", lambda e: self._prev())
         self.root.bind("<Right>", lambda e: self._next())
         for i in range(min(9, len(CLASSES))):
-            self.root.bind(str(i + 1), lambda e, c=i: self._set_class(c))
+            pass  # number keys replaced by A/E/T/R/N hotkeys
 
-        ia = _class_index("ally")
-        ie = _class_index("enemy")
+        # Team
+        self.root.bind("a", lambda e: self._set_team(0))
+        self.root.bind("A", lambda e: self._set_team(0))
+        self.root.bind("e", lambda e: self._set_team(1))
+        self.root.bind("E", lambda e: self._set_team(1))
+        # Effect
         it = _class_index("teleport")
         ir = _class_index("recall")
-        im = _class_index("map")
-        if ia is not None:
-            self.root.bind("a", lambda e: self._set_class(ia))
-            self.root.bind("A", lambda e: self._set_class(ia))
-        if ie is not None:
-            self.root.bind("e", lambda e: self._set_class(ie))
-            self.root.bind("E", lambda e: self._set_class(ie))
         if it is not None:
-            self.root.bind("t", lambda e: self._set_class(it))
-            self.root.bind("T", lambda e: self._set_class(it))
+            self.root.bind("t", lambda e: self._set_effect(it))
+            self.root.bind("T", lambda e: self._set_effect(it))
         if ir is not None:
-            self.root.bind("r", lambda e: self._set_class(ir))
-            self.root.bind("R", lambda e: self._set_class(ir))
-        if im is not None:
-            self.root.bind("m", lambda e: self._set_class(im))
-            self.root.bind("M", lambda e: self._set_class(im))
+            self.root.bind("r", lambda e: self._set_effect(ir))
+            self.root.bind("R", lambda e: self._set_effect(ir))
+        self.root.bind("n", lambda e: self._set_effect(None))
+        self.root.bind("N", lambda e: self._set_effect(None))
 
         self.root.bind("s", lambda e: self._save())
         self.root.bind("<Control-s>", lambda e: self._save())
         self.root.bind("z", lambda e: self._undo())
         self.root.bind("<Control-z>", lambda e: self._undo())
         self.root.bind("<Delete>", lambda e: self._delete_selected())
+
+    def _compute_display_size(self, iw: int, ih: int) -> tuple[int, int]:
+        """Scale image to fit the screen while preserving aspect ratio (no letterboxing)."""
+        try:
+            sw = max(_CANVAS_MIN_W, self.root.winfo_screenwidth() - _CANVAS_MARGIN_X)
+            sh = max(_CANVAS_MIN_H, self.root.winfo_screenheight() - _CANVAS_MARGIN_Y)
+        except tk.TclError:
+            sw, sh = 1280, 720
+        scale = min(sw / max(iw, 1), sh / max(ih, 1))
+        dw = max(1, int(round(iw * scale)))
+        dh = max(1, int(round(ih * scale)))
+        return dw, dh
 
     def _load_image(self):
         if not self.images:
@@ -431,8 +531,17 @@ class AnnotationTool:
         pil_raw = Image.open(str(p)).convert("RGB")
         img_rgb = np.array(pil_raw)
         self.img_h, self.img_w = img_rgb.shape[:2]
-        pil = Image.fromarray(img_rgb).resize((DISPLAY_SZ, DISPLAY_SZ), Image.NEAREST)
+        self.disp_w, self.disp_h = self._compute_display_size(self.img_w, self.img_h)
+        _rs = (
+            Image.Resampling.LANCZOS
+            if hasattr(Image, "Resampling")
+            else Image.LANCZOS
+        )
+        pil = Image.fromarray(img_rgb).resize((self.disp_w, self.disp_h), _rs)
         self.tk_img = ImageTk.PhotoImage(pil)
+        self.canvas.config(width=self.disp_w, height=self.disp_h)
+        if hasattr(self, "_hint_lbl"):
+            self._hint_lbl.config(wraplength=max(self.disp_w + 40, 400))
         lbl_path = LABEL_DIR / f"{p.stem}.txt"
         if not lbl_path.exists():
             auto = _ROOT / "dataset_minimap" / "labels" / "train" / f"{p.stem}.txt"
@@ -448,8 +557,8 @@ class AnnotationTool:
     def _redraw(self):
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor="nw", image=self.tk_img)
-        sx = DISPLAY_SZ / self.img_w
-        sy = DISPLAY_SZ / self.img_h
+        sx = self.disp_w / self.img_w
+        sy = self.disp_h / self.img_h
         for i, (cls, cx, cy, bw, bh) in enumerate(self.boxes):
             if cls < 0 or cls >= len(CLASSES):
                 continue
@@ -476,28 +585,81 @@ class AnnotationTool:
                 fill="white",
                 font=("Segoe UI", 8, "bold"),
             )
-        self._update_class_ui()
+        self._update_ui()
 
-    def _set_class(self, cls):
-        self.cur_class = max(0, min(len(CLASSES) - 1, cls))
-        self._update_class_ui()
+    def _set_team(self, team: int):
+        self.cur_team = team
+        self._update_ui()
 
-    def _update_class_ui(self):
-        for i, btn in enumerate(self._class_btns):
-            active = i == self.cur_class
+    def _set_effect(self, effect):
+        self.cur_effect = effect
+        self._update_ui()
+
+    def _update_ui(self):
+        team_names  = ["ally", "enemy"]
+        team_colors = ["#22dd44", "#dd2244"]
+        effect_map  = {None: (0, "none", "#666688"), 2: (1, "teleport", "#ffcc00"), 3: (2, "recall", "#aa66ff")}
+
+        for i, btn in enumerate(self._team_btns):
+            active = i == self.cur_team
+            tname  = team_names[i]
+            tkey   = "A" if i == 0 else "E"
+            tcolor = team_colors[i]
             btn.config(
+                text=f"{'✔  ' if active else '    '}{tname.title()}  [{tkey}]",
                 relief="sunken" if active else "flat",
-                bg="#333355" if active else "#1a1a2e",
+                bg="#2a2a4a" if active else "#1a1a2e",
             )
-        name = CLASSES[self.cur_class]
-        color = COLORS[self.cur_class]
+
+        eff_order = [None, 2, 3]
+        eff_keys  = ["N", "T", "R"]
+        eff_names = ["none", "teleport", "recall"]
+        eff_colors= ["#666688", "#ffcc00", "#aa66ff"]
+        for i, btn in enumerate(self._effect_btns):
+            ev = eff_order[i]
+            active = ev == self.cur_effect
+            btn.config(
+                text=f"{'✔  ' if active else '    '}{eff_names[i].title()}  [{eff_keys[i]}]",
+                relief="sunken" if active else "flat",
+                bg="#2a2a4a" if active else "#1a1a2e",
+            )
+
+        tcolor = team_colors[self.cur_team]
+        tname  = team_names[self.cur_team]
+        parts  = ["champion_icon", tname]
+        if self.cur_effect is not None:
+            _, eff_name, _ = effect_map[self.cur_effect]
+            parts.append(eff_name)
         self.lbl_class.config(
-            text=f"Drawing: {name.replace('_', ' ').title()}", fg=color
+            text="Drawing: " + " + ".join(parts), fg=tcolor
         )
 
+        # update bottom status chips
+        if hasattr(self, "_chip_ally"):
+            # team
+            if self.cur_team == 0:
+                self._chip_ally.config(text="✔  ally",   bg="#0a2a0a")
+                self._chip_enemy.config(text="○  enemy",  bg="#0d0d1a")
+            else:
+                self._chip_ally.config(text="○  ally",   bg="#0d0d1a")
+                self._chip_enemy.config(text="✔  enemy",  bg="#2a0a0a")
+            # effect
+            if self.cur_effect is None:
+                self._chip_none.config(    text="✔  none",     bg="#1a1a2e")
+                self._chip_teleport.config(text="○  teleport", bg="#0d0d1a")
+                self._chip_recall.config(  text="○  recall",   bg="#0d0d1a")
+            elif self.cur_effect == 2:
+                self._chip_none.config(    text="○  none",     bg="#0d0d1a")
+                self._chip_teleport.config(text="✔  teleport", bg="#1a1a08")
+                self._chip_recall.config(  text="○  recall",   bg="#0d0d1a")
+            else:
+                self._chip_none.config(    text="○  none",     bg="#0d0d1a")
+                self._chip_teleport.config(text="○  teleport", bg="#0d0d1a")
+                self._chip_recall.config(  text="✔  recall",   bg="#150d20")
+
     def _canvas_to_img(self, cx, cy):
-        sx = DISPLAY_SZ / self.img_w
-        sy = DISPLAY_SZ / self.img_h
+        sx = self.disp_w / self.img_w
+        sy = self.disp_h / self.img_h
         return cx / sx, cy / sy
 
     def _box_at(self, cx, cy):
@@ -512,15 +674,10 @@ class AnnotationTool:
         return -1
 
     def _on_press(self, ev):
-        hit = self._box_at(ev.x, ev.y)
-        if hit >= 0:
-            self.sel = hit
-            self.drag_start = None
-            self._redraw()
-        else:
-            self.sel = -1
-            self.drag_start = (ev.x, ev.y)
-            self.drag_rect = None
+        # Defer selection to release so a drag starting inside a box still creates a new box.
+        self._press_hit = self._box_at(ev.x, ev.y)
+        self.drag_start = (ev.x, ev.y)
+        self.drag_rect = None
 
     def _on_drag(self, ev):
         if self.drag_start is None:
@@ -528,7 +685,7 @@ class AnnotationTool:
         if self.drag_rect:
             self.canvas.delete(self.drag_rect)
         x0, y0 = self.drag_start
-        color = COLORS[self.cur_class]
+        color = "#22dd44" if self.cur_team == 0 else "#dd2244"
         self.drag_rect = self.canvas.create_rectangle(
             x0, y0, ev.x, ev.y, outline=color, width=2, dash=(4, 2)
         )
@@ -543,7 +700,13 @@ class AnnotationTool:
             self.drag_rect = None
         self.drag_start = None
 
-        if abs(x1 - x0) < 5 or abs(y1 - y0) < 5:
+        # Chebyshev distance: both axes small = click (select); thin drags still create boxes.
+        if max(abs(x1 - x0), abs(y1 - y0)) < 5:
+            if self._press_hit >= 0:
+                self.sel = self._press_hit
+            else:
+                self.sel = -1
+            self._redraw()
             return
 
         ix0, iy0 = self._canvas_to_img(x0, y0)
@@ -553,7 +716,17 @@ class AnnotationTool:
         cy = max(0.0, min(1.0, cy))
         bw = max(0.001, min(1.0, bw))
         bh = max(0.001, min(1.0, bh))
-        self.boxes.append([self.cur_class, cx, cy, bw, bh])
+
+        champ_idx = _class_index("champion_icon")
+        to_add = []
+        if champ_idx is not None:
+            to_add.append([champ_idx, cx, cy, bw, bh])          # champion_icon always
+        to_add.append([self.cur_team, cx, cy, bw, bh])           # ally or enemy
+        if self.cur_effect is not None:
+            to_add.append([self.cur_effect, cx, cy, bw, bh])     # teleport or recall
+
+        self.boxes.extend(to_add)
+        self._last_draw_count = len(to_add)
         self.sel = len(self.boxes) - 1
         self._redraw()
 
@@ -571,8 +744,10 @@ class AnnotationTool:
             self._redraw()
 
     def _undo(self):
+        n = max(1, self._last_draw_count)
         if self.boxes:
-            self.boxes.pop()
+            del self.boxes[-n:]
+            self._last_draw_count = 0
             self.sel = -1
             self._redraw()
 
@@ -602,7 +777,7 @@ class AnnotationTool:
 
 def main():
     root = tk.Tk()
-    root.resizable(False, False)
+    root.resizable(True, True)
     AnnotationTool(root)
     root.mainloop()
 
