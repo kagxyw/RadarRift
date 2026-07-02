@@ -34,7 +34,7 @@ cp2/
 ## Requirements
 
 ```bash
-pip install torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu124
+pip install torch==2.4.1 torchvision==0.19.1
 pip install ultralytics==8.4.21 opencv-python pillow numpy matplotlib pyyaml
 ```
 
