@@ -1,5 +1,13 @@
 # RadarRift — CP3
 
+## Download (pre-built Windows executable)
+
+> **[RadarRift-v1.0.0.zip](https://github.com/kagxyw/RadarRift/releases/download/v1.0.0/RadarRift-v1.0.0.zip)**
+> (~380 MB, no Python required)
+
+1. Download and extract the zip
+2. Run `RadarRift.exe`
+
 ## What changed since CP2
 
 ### 1. Continued model training (`best.pt` → `continue_Teleport`)
