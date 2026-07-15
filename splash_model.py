@@ -114,9 +114,19 @@ def load_model():
             f"Splash model not found at {BEST_PT}.\n"
             "Run  python splash_model.py train  first."
         )
-    from ultralytics import YOLO
-    print(f"Loading splash model from {BEST_PT} …")
-    _model = YOLO(str(BEST_PT))
+    # Patch torch.load for PyTorch >= 2.6 compatibility (weights_only default changed)
+    import torch as _torch
+    _orig_load = _torch.load
+    def _patched_load(*a, **k):
+        k["weights_only"] = False
+        return _orig_load(*a, **k)
+    _torch.load = _patched_load
+    try:
+        from ultralytics import YOLO
+        print(f"Loading splash model from {BEST_PT} …")
+        _model = YOLO(str(BEST_PT))
+    finally:
+        _torch.load = _orig_load
     return _model
 
 

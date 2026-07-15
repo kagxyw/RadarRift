@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QCompleter, QTextEdit, QPlainTextEdit,
 )
 
-from alert_audio import play_champion_tts, play_file
+from alert_audio import play_champion_tts, play_file, play_tp_alert
 from capture  import Capture
 from champions import (
     Champion,
@@ -47,7 +47,7 @@ from champions import (
     should_alert_for_role,
 )
 from constants import LANE_ROLES, LANE_ROLE_LABELS
-from constants import BG, FG, DIM, ALLY, ENE, ACT, ASSETS_DIR, _POS_FILE, _ROSTER_FILE
+from constants import BG, FG, DIM, ALLY, ENE, ACT, ASSETS_DIR, _POS_FILE
 from overlay_qt import QtOverlay
 from select_minimap import (
     auto_minimap_region,
@@ -548,7 +548,9 @@ class App(AppWindow):
         # ── tracking state ────────────────────────────────────────────────────
         self.capture:        Capture | None        = None
         self._death_capture: Capture | None        = None
+        self._player_death_capture: Capture | None = None
         self._death_region:  tuple   | None        = None
+        self._player_death_portrait_region: tuple[int, int, int, int] | None = None
         self.roster:         ChampionRoster | None = None
         self._library                              = None
         self._track_model                          = None
@@ -581,6 +583,10 @@ class App(AppWindow):
         self._enemy_on_map_since: dict[str, float] = {}
         self._enemy_off_map_since: dict[str, float] = {}
         self._alert_muted_enemies: set[str]       = set()
+        self._tps_in_radius: set[tuple] = set()
+        self._tp_last_alert: float = 0.0   # global last TP alert time
+        self._TP_COOLDOWN = 3.0
+        self._match_track_start_t: float | None = None
 
         # thread-safe setting caches
         self._fps_cap:        int | None = 5
@@ -860,6 +866,9 @@ class App(AppWindow):
         self._enemy_on_map_since.clear()
         self._enemy_off_map_since.clear()
         self._alert_muted_enemies.clear()
+        self._tps_in_radius.clear()
+        self._tp_last_alert = 0.0
+        self._match_track_start_t = None
 
     def _update_alert_mutes_for_on_map_time(self, roster: ChampionRoster,
                                             now: float) -> None:
@@ -893,14 +902,30 @@ class App(AppWindow):
                 self._enemy_on_map_since.pop(key, None)
                 self._enemy_off_map_since.pop(key, None)
 
+    def _match_elapsed_sec(self) -> float | None:
+        if self._match_track_start_t is None:
+            return None
+        return time.perf_counter() - self._match_track_start_t
+
+    def _role_filter_active(self) -> bool:
+        from constants import ROLE_ALERT_FILTER_SEC
+
+        elapsed = self._match_elapsed_sec()
+        if elapsed is None:
+            return False
+        return elapsed < ROLE_ALERT_FILTER_SEC
+
     def _enemy_allowed_for_radius_alert(self, enemy_key: str,
                                         roster: ChampionRoster) -> bool:
         if enemy_key in self._alert_muted_enemies:
             return False
-        enemy = next((c for c in roster.enemies if c.key == enemy_key), None)
-        if enemy is None:
-            return True
-        return should_alert_for_role(roster.player.role, enemy.role)
+        if self._role_filter_active():
+            enemy = next((c for c in roster.enemies if c.key == enemy_key), None)
+            if enemy is None:
+                return True
+            if not should_alert_for_role(roster.player.role, enemy.role):
+                return False
+        return True
 
     def _on_volume_change(self, val=None) -> None:
         try:
@@ -1181,11 +1206,9 @@ class App(AppWindow):
         if sel.result:
             x, y, w, h = sel.result
             self._death_region = sel.result
-            if self._death_capture:
-                self._death_capture.close()
-            self._death_capture = Capture(sel.result)
             self.death_region_lbl.setText(
                 f"{w}×{h}  at ({x}, {y})  [manual]")
+            self._sync_death_capture()
             self._save_pos()
 
     def _auto_death_region(self) -> None:
@@ -1201,9 +1224,9 @@ class App(AppWindow):
         return 0
 
     def _default_alert_radius_px(self) -> int:
-        """Default danger ring: 10% of minimap edge length."""
+        """Default danger ring: 20% of minimap edge length."""
         edge = self._minimap_edge_px()
-        return max(1, int(edge * 0.10)) if edge > 0 else 0
+        return max(1, int(edge * 0.20)) if edge > 0 else 0
 
     def _apply_default_alert_radius(self) -> None:
         if self._alert_radius_explicit and self.alert_radius == 0:
@@ -1457,7 +1480,15 @@ class App(AppWindow):
                 vis = self._overlay_markers_visible_for_paint()
                 # Active detection dots (what overlay draws for on-map champs)
                 if vis:
+                    pkey_dbg = lib.roster.player.key if lib is not None else None
+                    pst_dbg  = lib._state.get(pkey_dbg) if pkey_dbg else None
+                    hide_pl  = bool(
+                        pst_dbg and getattr(
+                            pst_dbg, "suppress_marker_until_map", False)
+                    )
                     for r in dbg_res:
+                        if hide_pl and r.get("key") == pkey_dbg:
+                            continue
                         cx_r = int(r["location"][0] * scale)
                         cy_r = int(r["location"][1] * scale)
                         col  = _DEMO_COLORS.get(r.get("team", ""), (200, 200, 200))
@@ -1468,7 +1499,7 @@ class App(AppWindow):
                     if self.alert_radius > 0 and lib is not None:
                         pkey = lib.roster.player.key
                         pst  = lib._state.get(pkey)
-                        if pst and pst.pos:
+                        if pst and pst.pos and not hide_pl:
                             cap_sz = (self.capture.region[2]
                                       if self.capture is not None else 1)
                             r_sc = int(self.alert_radius * SZ / max(cap_sz, 1))
@@ -1814,7 +1845,6 @@ class App(AppWindow):
             player=player_c, allies=allies, enemies=enemies,
             enemy_side=enemy_side,
         ))
-        self._save_roster_file(self.roster)
         self._library = None
         self._reset_alert_tracking()
         self._build_roster_display()
@@ -1824,6 +1854,9 @@ class App(AppWindow):
             self._start()
 
     # ── tracking start / stop ─────────────────────────────────────────────────
+
+    _RR_ACTIVE_FILE  = Path(__file__).resolve().parent / ".rr_active"
+    _RECORDINGS_DIR  = Path(__file__).resolve().parent / "recordings"
 
     def _start(self, auto: bool = False) -> None:
         if not self.capture:
@@ -1843,6 +1876,77 @@ class App(AppWindow):
         self._overlay.stop()
         self._sync_run_button_state()
         self._set_status("Stopped.", "stop")
+        try:
+            self._RR_ACTIVE_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _record_loop(self) -> None:
+        """Background recording thread — runs while self.running is True."""
+        import json as _json
+        from datetime import datetime as _dt
+        try:
+            import cv2 as _cv2
+            import mss as _mss
+            import numpy as _np
+        except ImportError:
+            return
+
+        region   = self.capture.region
+        interval = float(max(0.1, self.record_interval_spin.value()))
+        fps      = 1.0 / interval   # stored in metadata only; no VideoWriter
+        x, y, w, h = region
+
+        stamp   = _dt.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = self._RECORDINGS_DIR / stamp
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cp_path = out_dir / "checkpoints.json"
+
+        monitor  = {"left": x, "top": y, "width": w, "height": h}
+        checkpoints: list[dict] = []
+        frame_idx = 0
+
+        f11_prev = bool(ctypes.windll.user32.GetAsyncKeyState(0x7A) & 0x8000)
+
+        try:
+            with _mss.mss() as sct:
+                t_next = time.perf_counter()
+                while self.running:
+                    now = time.perf_counter()
+
+                    f11 = bool(
+                        ctypes.windll.user32.GetAsyncKeyState(0x7A) & 0x8000)
+                    if f11 and not f11_prev:
+                        checkpoints.append({
+                            "frame":     frame_idx,
+                            "time":      time.time(),
+                            "elapsed_s": round(frame_idx / fps, 3),
+                        })
+                    f11_prev = f11
+
+                    if now >= t_next:
+                        shot  = sct.grab(monitor)
+                        frame = _np.frombuffer(shot.bgra, dtype=_np.uint8)
+                        frame = frame.reshape((h, w, 4))[:, :, :3]
+                        fname = out_dir / f"frame_{frame_idx:06d}.png"
+                        _cv2.imwrite(str(fname), frame)
+                        frame_idx += 1
+                        t_next += interval
+                    else:
+                        time.sleep(max(0.0, t_next - now - 0.001))
+        finally:
+            cp_data = {
+                "folder":        out_dir.name,
+                "region":        list(region),
+                "fps":           fps,
+                "total_frames":  frame_idx,
+                "total_seconds": round(frame_idx / fps, 2),
+                "checkpoints":   checkpoints,
+            }
+            try:
+                cp_path.write_text(_json.dumps(cp_data, indent=2))
+            except Exception:
+                pass
 
     def _rebuild_library(self) -> None:
         try:
@@ -1866,10 +1970,18 @@ class App(AppWindow):
                 return
             if self._cancel_tracking_start:
                 return
+            self._match_track_start_t = time.perf_counter()
             self.running        = True
             self._infer_results = []
+            try:
+                self._RR_ACTIVE_FILE.touch()
+            except Exception:
+                pass
             threading.Thread(target=self._infer_loop,  daemon=True).start()
             threading.Thread(target=self._render_loop, daemon=True).start()
+            if self.record_cb.isChecked() and self.capture:
+                threading.Thread(
+                    target=self._record_loop, daemon=True).start()
         finally:
             self._tracking_starting = False
             if not self.running:
@@ -1879,7 +1991,6 @@ class App(AppWindow):
 
     def _infer_loop(self) -> None:
         from tracker import track_frame
-        _death_t: float = 0.0
         while self.running:
             t0      = time.perf_counter()
             roster  = self.roster
@@ -1896,16 +2007,21 @@ class App(AppWindow):
                 continue
 
             try:
-                frame = self.capture.grab()
+                self._overlay.set_capture_hidden(True)
+                frame = self.capture.grab_gdi()
             except Exception:
                 time.sleep(0.05)
                 continue
+            finally:
+                self._overlay.set_capture_hidden(
+                    self.capture_hidden_cb.isChecked())
             arr = np.array(frame)
             self._last_frame = arr
 
             try:
                 results = track_frame(arr, library, model=model_, now=t0,
                                       conf=self._yolo_conf,
+                                      tp_conf=0.08,
                                       off_timeout=self._off_timeout)
             except Exception:
                 results = []
@@ -1918,21 +2034,50 @@ class App(AppWindow):
             #     self._dbg_minimap_rgb = arr.copy()
             #     self._dbg_results     = list(results)
 
-            # death panel — temporarily disabled
-            # try:
-            #     dc = self._death_capture
-            #     if dc is not None and (t0 - _death_t) >= 0.5:
-            #         death_frame = np.array(dc.grab())
-            #         from death_panel import scan_death_panel
-            #         scan_death_panel(death_frame, library, now=t0)
-            #         _death_t = t0
-            # except Exception:
-            #     pass
+            # Enemy death strip (scan_death_panel) disabled — player portrait only
+            # when the tracker loses the player on the minimap.
+            player_key = library.roster.player.key
+            pst = library._state.get(player_key)
+
+            def _player_on_map(res: list[dict]) -> bool:
+                return any(
+                    r.get("key") == player_key and not r.get("inferred_from")
+                    for r in res
+                )
+
+            if not _player_on_map(results):
+                try:
+                    player_frame = None
+                    pc = self._player_death_capture
+                    if pc is not None:
+                        player_frame = np.array(pc.grab())
+                    from death_panel import apply_player_off_map_fallback
+                    results = apply_player_off_map_fallback(
+                        library,
+                        results,
+                        t0,
+                        player_frame_rgb=player_frame,
+                    )
+                    self._infer_results = results
+                    # if (player_frame is not None and player_frame.size > 0
+                    #         and self._infer_seq % 2 == 0):
+                    #     dc = self._death_capture
+                    #     if dc is not None:
+                    #         strip = np.array(dc.grab())
+                    #         if strip.size > 0:
+                    #             from death_panel import (
+                    #                 save_player_death_portrait_debug,
+                    #             )
+                    #             sh, sw = strip.shape[:2]
+                    #             save_player_death_portrait_debug(
+                    #                 strip, player_frame, (0, 0, sw, sh))
+                except Exception:
+                    pass
 
             # roster status
             roster_changed = False
             for c in roster.allies + roster.enemies + [roster.player]:
-                on     = library.is_visible(c.key, t0)
+                on     = library.roster_on_map(c.key, t0, self._off_timeout)
                 new_st = STATUS_ON_MAP if on else STATUS_OFF_MAP
                 if c.status != new_st:
                     c.status      = new_st
@@ -1941,14 +2086,24 @@ class App(AppWindow):
                 self._sig_refresh_roster.emit()
 
             # alert proximity
-            player_key    = library.roster.player.key
-            player_on_map = any(r["key"] == player_key for r in results)
-            if roster and self.alert_radius > 0 and player_on_map:
+            player_on_map = _player_on_map(results)
+            suppress = bool(
+                pst and getattr(pst, "suppress_marker_until_map", False)
+            )
+            if roster and self.alert_radius > 0 and player_on_map and not suppress:
                 self._update_alert_mutes_for_on_map_time(roster, t0)
                 pst = library._state.get(player_key)
                 if pst and pst.pos:
                     px, py   = pst.pos
                     cooldown = self._cooldown
+                    in_viewport = {
+                        r["key"] for r in results
+                        if r.get("team") == "enemy" and r.get("in_viewport")
+                    }
+                    # In the white camera box = already seen; start cooldown, no audio.
+                    for key in in_viewport:
+                        if self._enemy_allowed_for_radius_alert(key, roster):
+                            self._alert_exit_time[key] = t0
                     now_in: set[str] = set()
                     for r in results:
                         if r["team"] == "enemy":
@@ -1967,6 +2122,37 @@ class App(AppWindow):
                                 daemon=True,
                             ).start()
                     self._enemies_in_radius = now_in
+
+            # ── TP alert — fires for any teleport anywhere on the map ─────────
+            if not suppress:
+                tp_seen = any(
+                    r.get("team") == "tp_event" and r.get("class_name") == "teleport"
+                    for r in results
+                )
+                if tp_seen:
+                    self._tps_in_radius = {r["location"] for r in results
+                                           if r.get("team") == "tp_event"
+                                           and r.get("class_name") == "teleport"}
+                    # Save frame for debugging / CNN data collection
+                    try:
+                        import cv2 as _cv2
+                        _tp_debug_dir = Path(__file__).resolve().parent / "tp_detections"
+                        _tp_debug_dir.mkdir(exist_ok=True)
+                        _ts = time.strftime("%Y%m%d_%H%M%S")
+                        _ms = int((t0 % 1) * 1000)
+                        _save_path = _tp_debug_dir / f"tp_{_ts}_{_ms:03d}.png"
+                        _frame_bgr = _cv2.cvtColor(arr, _cv2.COLOR_RGB2BGR)
+                        _cv2.imwrite(str(_save_path), _frame_bgr)
+                    except Exception:
+                        pass
+                    if t0 - self._tp_last_alert >= self._TP_COOLDOWN:
+                        self._tp_last_alert = t0
+                        threading.Thread(
+                            target=self._play_tp_alert,
+                            daemon=True,
+                        ).start()
+                else:
+                    self._tps_in_radius = set()
 
             cap      = self._fps_cap
             target_s = (1.0 / cap) if cap else 0.0
@@ -2034,6 +2220,12 @@ class App(AppWindow):
 
     # ── alert sound ────────────────────────────────────────────────────────────
 
+    def _play_tp_alert(self) -> None:
+        vol = self._volume
+        if not play_tp_alert(vol):
+            if self.alert_sound and Path(self.alert_sound).exists():
+                play_file(self.alert_sound, vol)
+
     def _play_alert(self, enemy_key: str | None = None) -> None:
         vol = self._volume
         if self.alert_mode == "name":
@@ -2093,7 +2285,10 @@ class App(AppWindow):
                 try:
                     from backend import load_splash_model
                     splash_model = self._splash_model = load_splash_model()
-                except Exception:
+                except Exception as _e:
+                    import traceback
+                    print(f"[watcher] Failed to load splash model: {_e}")
+                    traceback.print_exc()
                     splash_model = None
                     self._splash_model = None
 
@@ -2151,7 +2346,10 @@ class App(AppWindow):
                             else:
                                 splash_boxes = result
                             n_cards = len(splash_boxes)
-                        except Exception:
+                        except Exception as _e:
+                            import traceback
+                            print(f"[watcher] detect_cards error: {_e}")
+                            traceback.print_exc()
                             n_cards = 0
 
                     consecutive   = (consecutive + 1) if n_cards == 10 else 0
@@ -2181,27 +2379,6 @@ class App(AppWindow):
                          args=(screenshot, splash_boxes, name_boxes),
                          daemon=True).start()
 
-    def _save_roster_file(self, roster: ChampionRoster) -> None:
-        try:
-            _ROSTER_FILE.write_text(json.dumps({
-                "player": {
-                    "name": roster.player.name,
-                    "key": roster.player.key,
-                    "role": roster.player.role,
-                },
-                "allies": [
-                    {"name": c.name, "key": c.key, "role": c.role}
-                    for c in roster.allies
-                ],
-                "enemies": [
-                    {"name": c.name, "key": c.key, "role": c.role}
-                    for c in roster.enemies
-                ],
-                "enemy_side": roster.enemy_side,
-            }, indent=2))
-        except Exception:
-            pass
-
     def _do_identify(self, screenshot: Image.Image,
                      splash_boxes: list | None = None,
                      name_boxes:   list | None = None) -> None:
@@ -2219,7 +2396,6 @@ class App(AppWindow):
             self._sig_status.emit("Detection failed — enter manually.", "stop")
             return
 
-        self._save_roster_file(roster)
         self._sig_roster_done.emit(roster)
 
     def _on_roster_identified(self, roster) -> None:
@@ -2260,12 +2436,47 @@ class App(AppWindow):
             self.death_region_lbl.setText(f"{w}×{h}  at ({x}, {y})  [auto]")
         else:
             return
+        if self.capture is not None:
+            from death_panel import player_death_portrait_region
+            self._player_death_portrait_region = player_death_portrait_region(
+                self.capture.region)
         if self._death_capture is not None:
             try:
                 self._death_capture.close()
             except Exception:
                 pass
         self._death_capture = Capture(region)
+        if self._player_death_capture is not None:
+            try:
+                self._player_death_capture.close()
+            except Exception:
+                pass
+        self._player_death_capture = None
+        if self._player_death_portrait_region is not None:
+            self._player_death_capture = Capture(
+                self._player_death_portrait_region)
+        # self._save_player_death_portrait_debug_snapshot()
+
+    def _save_player_death_portrait_debug_snapshot(self) -> None:
+        """Grab death strip + player portrait and write debug PNGs."""
+        return  # debug_crops disabled
+        # dc = self._death_capture
+        # pc = self._player_death_capture
+        # if dc is None or pc is None:
+        #     return
+        # try:
+        #     import numpy as np
+        #     from death_panel import save_player_death_portrait_debug
+        #
+        #     strip = np.array(dc.grab())
+        #     player = np.array(pc.grab())
+        #     if strip.size == 0 or player.size == 0:
+        #         return
+        #     h, w = strip.shape[:2]
+        #     save_player_death_portrait_debug(
+        #         strip, player, (0, 0, w, h))
+        # except Exception:
+        #     pass
 
     def _game_end_monitor_loop(self) -> None:
         """While tracking is active, detect when League of Legends.exe exits and
@@ -2460,6 +2671,10 @@ class App(AppWindow):
                 "geo_x": self.x(), "geo_y": self.y(),
                 "region":       list(self.capture.region) if self.capture else None,
                 "death_region": list(self._death_region) if self._death_region else None,
+                "player_death_portrait_region": (
+                    list(self._player_death_portrait_region)
+                    if self._player_death_portrait_region else None
+                ),
                 "fps":                self.fps_combo.currentText(),
                 "alert_radius":       self.alert_radius,
                 "alert_sound":        self.alert_sound,
@@ -2477,6 +2692,8 @@ class App(AppWindow):
                 "dot_size":           self.dot_size_spin.value(),
                 "ring_thickness":     self.ring_thickness_spin.value(),
                 "capture_hidden":     self.capture_hidden_cb.isChecked(),
+                "record_minimap":     self.record_cb.isChecked(),
+                "record_interval":    self.record_interval_spin.value(),
                 "champ_forms":        self._champ_forms,
                 "ghost_marker_mode":  (self.ghost_marker_mode_combo.currentData()
                                        or "always"),
@@ -2563,6 +2780,10 @@ class App(AppWindow):
 
             self.capture_hidden_cb.setChecked(
                 bool(data.get("capture_hidden", True)))
+            self.record_cb.setChecked(
+                bool(data.get("record_minimap", False)))
+            self.record_interval_spin.setValue(
+                float(data.get("record_interval", 1.0)))
             QTimer.singleShot(60, self._apply_capture_exclusion)
 
             region = data.get("region")
@@ -2576,13 +2797,22 @@ class App(AppWindow):
             death_region = data.get("death_region")
             if death_region and len(death_region) == 4:
                 dr = tuple(death_region)
-                self._death_region  = dr
+                self._death_region = dr
                 dx, dy, dw, dh = dr
-                self._death_capture = Capture(dr)
                 self.death_region_lbl.setText(
                     f"{dw}×{dh}  at ({dx}, {dy})  [manual]")
-            elif region and len(region) == 4:
+            if self.capture is not None and (
+                death_region or region
+            ):
                 self._sync_death_capture()
+
+            pdr = data.get("player_death_portrait_region")
+            if pdr and len(pdr) == 4:
+                self._player_death_portrait_region = tuple(pdr)
+            elif region and len(region) == 4:
+                from death_panel import player_death_portrait_region
+                self._player_death_portrait_region = player_death_portrait_region(
+                    tuple(region))
 
             cf = data.get("champ_forms", {})
             if isinstance(cf, dict):

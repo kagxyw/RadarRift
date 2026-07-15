@@ -134,6 +134,15 @@ def play_file(path: str | Path, volume: float, *, speed: float = 1.0) -> bool:
         return False
 
 
+def play_tp_alert(volume: float, *, speed: float = TTS_PLAYBACK_SPEED) -> bool:
+    """Play the pre-generated 'Teleport' TTS audio clip."""
+    for base in _TTS_DIRS:
+        path = base / "Teleport.mp3"
+        if path.is_file() and path.stat().st_size > 200:
+            return play_file(path, volume, speed=speed)
+    return False
+
+
 def play_champion_tts(
     champion_key: str,
     volume: float,

@@ -1,0 +1,11 @@
+path: D:/RadarRift/session_teleport
+train: images
+val: images
+
+nc: 5
+names:
+  - ally
+  - enemy
+  - teleport
+  - recall
+  - champion_icon

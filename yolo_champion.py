@@ -22,7 +22,7 @@ from ultralytics import YOLO
 
 ROOT       = Path(__file__).parent
 DATA_YAML  = ROOT / "dataset_champion" / "dataset.yaml"
-WEIGHTS    = ROOT / "runs" / "detect" / "radarrift_champion" / "weights" / "best.pt"
+WEIGHTS    = ROOT / "runs" / "detect" / "continue_Teleport" / "weights" / "best.pt"
 BASE_MODEL = ROOT / "cache" / "minimap_yolo11n.pt"
 
 

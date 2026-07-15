@@ -350,7 +350,7 @@ class OnnxDetector:
 
 def load_minimap_detector(conf: float = 0.26) -> OnnxDetector:
     """Load the minimap champion-icon detector. Exports .pt → .onnx in dev if needed."""
-    return OnnxDetector(resolve_minimap_onnx_path(), conf=conf)
+    return OnnxDetector(resolve_minimap_onnx_path(), conf=conf, imgsz=320)
 
 
 def load_splash_detector(conf: float = 0.40) -> OnnxDetector:
@@ -360,8 +360,14 @@ def load_splash_detector(conf: float = 0.40) -> OnnxDetector:
 
 # ── PyTorch-compatible interface (drop-in for yolo_model / splash_model) ──────
 
-# Class names for the minimap detection model (single-class champion detector)
-_MINIMAP_CLASSES = {0: "champion_icon"}
+# Class names for the minimap detection model (radarrift_final4: 5-class)
+_MINIMAP_CLASSES = {
+    0: "ally",
+    1: "enemy",
+    2: "teleport",
+    3: "recall",
+    4: "champion_icon",
+}
 
 _minimap_det: OnnxDetector | None = None
 _splash_det:  OnnxDetector | None = None

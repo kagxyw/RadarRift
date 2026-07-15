@@ -19,7 +19,6 @@ env/
 
 # App-local state (positions, roster)
 .radarrift_pos.json
-.radarrift_roster.json
 pos.json
 radarrift_pos.json
 

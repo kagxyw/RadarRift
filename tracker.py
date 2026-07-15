@@ -66,6 +66,9 @@ _ORB_FEATURES   = 200    # max keypoints per image
 _ORB_SCALE      = 60.0   # ORB match count that maps to "perfect" (score=1.0)
 _ORB_W          = 0.60   # weight of ORB_norm added to BC in combined score
 
+# White camera-viewport rectangle on minimap (threshold + largest contour)
+_VIEWPORT_BRIGHT = 215
+
 # ── Icon cache ────────────────────────────────────────────────────────────────
 
 ICON_DIR   = Path(__file__).parent / "cache" / "icons"
@@ -110,6 +113,103 @@ def canon_champ_key(name_or_key: str) -> str:
             if isinstance(nm, str) and nm.lower() == lo:
                 return k
     return raw
+
+
+def find_viewport_box(
+    bgr: np.ndarray,
+    *,
+    bright: int = _VIEWPORT_BRIGHT,
+) -> tuple[int, int, int, int] | None:
+    """(x1, y1, x2, y2) of the largest bright contour — LoL camera viewport outline."""
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    _, mask = cv2.threshold(gray, bright, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    largest = max(contours, key=cv2.contourArea)
+    x, y, bw, bh = cv2.boundingRect(largest)
+    if bw < 1 or bh < 1:
+        return None
+    return (x, y, x + bw, y + bh)
+
+
+def location_in_viewport(
+    px: int,
+    py: int,
+    viewport: tuple[int, int, int, int] | None,
+) -> bool:
+    if viewport is None:
+        return False
+    x1, y1, x2, y2 = viewport
+    return x1 <= px <= x2 and y1 <= py <= y2
+
+
+# Minimap fog / dead-unseen terrain: desaturated gray (low chroma + low saturation).
+_FOG_CHROMA_MAX = 9.5
+_FOG_SAT_MAX = 45.0
+
+
+def measure_patch_color(rgb: np.ndarray) -> tuple[float, float]:
+    """
+    Mean chroma (distance from neutral gray) and HSV saturation for a patch.
+    Returns (0, 0) for empty input.
+    """
+    if rgb.size == 0:
+        return 0.0, 0.0
+    if rgb.ndim == 2:
+        rgb = cv2.cvtColor(rgb, cv2.COLOR_GRAY2RGB)
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    sat = float(hsv[:, :, 1].mean())
+    gray = rgb.mean(axis=2)
+    chroma = np.sqrt(
+        (rgb[:, :, 0].astype(np.float32) - gray) ** 2
+        + (rgb[:, :, 1].astype(np.float32) - gray) ** 2
+        + (rgb[:, :, 2].astype(np.float32) - gray) ** 2
+    )
+    return float(chroma.mean()), sat
+
+
+def is_fog_patch(rgb: np.ndarray) -> bool:
+    """True if patch looks like dead / unseen minimap fog (grayscale terrain)."""
+    chroma, sat = measure_patch_color(rgb)
+    return chroma < _FOG_CHROMA_MAX and sat < _FOG_SAT_MAX
+
+
+def is_alive_patch(rgb: np.ndarray) -> bool:
+    """True if patch has enough color to be live minimap (icon or revealed terrain)."""
+    return not is_fog_patch(rgb)
+
+
+def sample_patch_at(
+    frame_rgb: np.ndarray,
+    cx: int,
+    cy: int,
+    half: int = 16,
+) -> np.ndarray | None:
+    """Square RGB crop centered on (cx, cy), clamped to frame bounds."""
+    h, w = frame_rgb.shape[:2]
+    x1 = max(0, cx - half)
+    y1 = max(0, cy - half)
+    x2 = min(w, cx + half)
+    y2 = min(h, cy + half)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return frame_rgb[y1:y2, x1:x2]
+
+
+def sample_alive_at(
+    frame_rgb: np.ndarray,
+    cx: int,
+    cy: int,
+    half: int = 16,
+) -> bool | None:
+    """
+    Small minimap sample: True ≈ alive (color), False ≈ dead/fog, None if out of bounds.
+    """
+    patch = sample_patch_at(frame_rgb, cx, cy, half=half)
+    if patch is None or patch.size < 16:
+        return None
+    return is_alive_patch(patch)
 
 
 def fetch_icon(key: str) -> Image.Image:
@@ -209,10 +309,14 @@ class _State:
     # _MIN_CONFIRM consecutive confirmed frames (same bar as position commits)
     ghost_active: bool  = False
     ghost_clears: int   = 0      # consecutive confirmed frames since reappearing
-    # Death state — set by death_panel.scan_death_panel(), cleared on respawn
+    # Death state — set by death_panel.scan_player_death_portrait(), cleared on respawn
     dead:          bool = False
     dead_confirms: int  = 0   # consecutive frames icon matched; commits dead after threshold
     dead_clears:   int  = 0   # consecutive frames icon absent; clears dead after threshold
+    # While YOLO loses the player icon, follow this champ’s position (stack / collision)
+    infer_stack_key: str | None = None
+    # After death: hide minimap marker until YOLO picks up the player again (not inferred)
+    suppress_marker_until_map: bool = False
 
 
 # ── Champion reference library ────────────────────────────────────────────────
@@ -315,6 +419,18 @@ class ChampionLibrary:
         st = self._state.get(key)
         return st is not None and (now - st.last_seen) < off_timeout
 
+    def roster_on_map(self, key: str, now: float,
+                      off_timeout: float = _OFF_TIMEOUT) -> bool:
+        """Roster UI on/off map. Player is off map only when dead."""
+        if key == self.roster.player.key:
+            st = self._state.get(key)
+            if st is None:
+                return False
+            return not (
+                st.dead or getattr(st, "suppress_marker_until_map", False)
+            )
+        return self.is_visible(key, now, off_timeout)
+
     def last_pos(self, key: str) -> tuple[int, int] | None:
         st = self._state.get(key)
         return st.pos if st else None
@@ -350,6 +466,9 @@ def _save_debug_frames(frame_bgr: np.ndarray,
                        combined: "np.ndarray | None" = None,
                        orb_extra: "np.ndarray | None" = None,
                        bc_threshold: float = _BC_THRESHOLD) -> None:
+    """Write debug images to debug_crops/ (disabled)."""
+    return  # debug_crops disabled
+
     """
     Write debug images to debug_crops/:
       yolo_boxes.jpg    — raw YOLO detections
@@ -447,6 +566,7 @@ def track_frame(
     model=None,
     threshold:   float        = _BC_THRESHOLD,
     conf:        float        = 0.25,
+    tp_conf:     float        = 0.0001,
     now:         float | None = None,
     off_timeout: float        = _OFF_TIMEOUT,
 ) -> list[dict]:
@@ -475,10 +595,46 @@ def track_frame(
     library.off_timeout = off_timeout   # make it available to _draw
 
     from backend import infer as _infer
+    from tp_confirm import get_confirmer as _get_confirmer, PAD_FRAC as _TP_PAD
     frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-    dets = _infer(_get_yolo(model), frame_bgr, conf=conf)
+
+    # Low-conf pass for TP/recall (catches faint animations)
+    _TP_CLASSES = {"teleport", "recall"}
+    all_dets = _infer(_get_yolo(model), frame_bgr, conf=min(tp_conf, conf))
+
+    _confirmer = _get_confirmer()
+    _fh, _fw = frame_bgr.shape[:2]
+
+    tp_event_results: list[dict] = []
+    for d in all_dets:
+        if d.get("class_name") not in _TP_CLASSES or d["conf"] < tp_conf:
+            continue
+        x1, y1, x2, y2 = d["box"]
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+        # CNN confirmation: only for "teleport" detections (recall is kept as-is)
+        if d["class_name"] == "teleport":
+            bw, bh = x2 - x1, y2 - y1
+            pad_x, pad_y = int(bw * _TP_PAD), int(bh * _TP_PAD)
+            rx1, ry1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+            rx2, ry2 = min(_fw, x2 + pad_x), min(_fh, y2 + pad_y)
+            crop = frame_bgr[ry1:ry2, rx1:rx2]
+            confirmed, cnn_prob = _confirmer.is_teleport(crop)
+            if not confirmed:
+                continue   # CNN says this is not a real teleport
+
+        tp_event_results.append({
+            "class_name": d["class_name"],
+            "location":   (cx, cy),
+            "conf":       d["conf"],
+            "box":        d["box"],
+            "team":       "tp_event",
+        })
+
+    # Filter to regular conf threshold for champion matching
+    dets = [d for d in all_dets if d["conf"] >= conf]
     if not dets:
-        return []
+        return tp_event_results
 
     boxes   = [d["box"] for d in dets]
     centres = [((b[0] + b[2]) // 2, (b[1] + b[3]) // 2) for b in boxes]
@@ -588,18 +744,30 @@ def track_frame(
 
     # ── Ghost latch maintenance ───────────────────────────────────────────────
     confirmed_keys = {r["key"] for r in results}
-    for c in library.all:
+    for ci, c in enumerate(library.all):
         st = library._state[c.key]
         if c.key in confirmed_keys:
             st.ghost_clears += 1
             if st.ghost_clears >= _MIN_CONFIRM:
                 st.ghost_active = False
                 st.dead = False   # confirmed alive on map — clear death state
+                if library.team[ci] == "player":
+                    st.suppress_marker_until_map = False
+            if (library.team[ci] == "player"
+                    and st.ghost_clears >= _MIN_CONFIRM):
+                st.infer_stack_key = None
         else:
             st.ghost_clears = 0
             # Latch ghost ON once the champion exceeds the off-timeout window
-            if st.pos is not None and not library.is_visible(c.key, now, off_timeout):
+            if (library.team[ci] != "player"
+                    and st.pos is not None
+                    and not library.is_visible(c.key, now, off_timeout)):
                 st.ghost_active = True
+
+    viewport = find_viewport_box(frame_bgr)
+    for r in results:
+        cx, cy = r["location"]
+        r["in_viewport"] = location_in_viewport(cx, cy, viewport)
 
     # # ── Debug snapshot (every _DEBUG_INTERVAL frames) ────────────────────────
     # _debug_frame_counter += 1
@@ -608,6 +776,7 @@ def track_frame(
     #                        combined=combined, orb_extra=orb_extra,
     #                        bc_threshold=threshold)
 
+    results.extend(tp_event_results)
     return results
 
 
