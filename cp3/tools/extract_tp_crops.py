@@ -21,9 +21,10 @@ from pathlib import Path
 random.seed(42)
 np.random.seed(42)
 
-IMG_DIR  = Path("session_teleport/images")
-LBL_DIR  = Path("session_teleport/labels")
-OUT_ROOT = Path("dataset_tp_cls")
+_CP3     = Path(__file__).resolve().parent.parent
+IMG_DIR  = _CP3 / "session_teleport/images"
+LBL_DIR  = _CP3 / "session_teleport/labels"
+OUT_ROOT = _CP3 / "dataset_tp_cls"
 CROP_SZ  = 64
 PAD_FRAC = 0.3
 VAL_FRAC = 0.20   # fraction of each class held out for val (stratified)

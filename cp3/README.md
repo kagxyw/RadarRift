@@ -69,7 +69,7 @@ Added a dedicated **"Teleport" TTS audio clip** (`tts_out/Teleport.mp3`) that fi
 
 The entire TP detection path was restructured:
 
-**Before (CP2):** Standard YOLO pass at `conf=0.25`, radius-based alert with a per-location bucket cooldown, and a post-processing step that re-labeled `recall` detections as `teleport` if no `champion_icon` was nearby.
+**Before (CP2):** Standard YOLO pass at `conf=0.25`, radius-based alert with a per-location bucket cooldown.
 
 **After (CP3):**
 
@@ -77,11 +77,9 @@ The entire TP detection path was restructured:
 
 2. **CNN secondary confirmation gate** — every YOLO `teleport` box is cropped and passed to a binary CNN (`tp_confirm_cls.pt`). The CNN outputs a probability; if it's below 0.55 the detection is dropped silently before it can trigger an alert. `recall` boxes skip the CNN (they pass through directly).
 
-3. **Removed the recall→teleport re-labeling logic** — the previous heuristic (if no `champion_icon` nearby, treat recall as teleport) was removed because it caused confusion and the CNN now handles the ambiguity more cleanly.
+3. **Alert covers the entire map** — the earlier proximity radius check was removed. Any confirmed teleport anywhere on the minimap triggers the warning, not just ones within a certain distance of the player.
 
-4. **Alert covers the entire map** — the earlier proximity radius check was removed. Any confirmed teleport anywhere on the minimap triggers the warning, not just ones within a certain distance of the player.
-
-5. **Global 3-second cooldown** — one alert fires per 3 seconds maximum, regardless of where on the map the TP is.
+4. **Global 3-second cooldown** — one alert fires per 3 seconds maximum, regardless of where on the map the TP is.
 
    **Why 3 seconds:** A teleport animation lasts roughly 3–4 seconds total. The intent is to alert once per teleport event, not once per detected frame.
 
@@ -115,12 +113,17 @@ Every time a teleport is confirmed, the minimap frame is saved to `tp_detections
 | `best.pt` | YOLO detector (`continue_Teleport`) — 5 classes: ally / enemy / teleport / recall / champion_icon |
 | `tp_confirm_cls.pt` | CNN binary classifier weights (teleport vs not_teleport) |
 | `tp_confirm.py` | Module used by `tracker.py` to load and run the CNN |
-| `eval.py` | Evaluate the YOLO detector on a validation set, outputs `eval.png` |
+| `eval_compare.png` | CP2 vs CP3 per-class metric chart (pre-generated) |
 | `annotation_tool.py` | Label tool for creating/editing YOLO annotations |
+| `session_teleport/` | Full training dataset (135 real + 228 synth images, YOLO labels) |
+| `dataset_tp_cls/` | CNN binary classifier crops (train/val split) |
+| `tools/eval_yolo_compare.py` | Run CP2 vs CP3 YOLO evaluation, prints table |
+| `tools/plot_yolo_compare.py` | Regenerate `eval_compare.png` from hardcoded results |
 | `tools/extract_tp_crops.py` | Extract labeled 64×64 crops for CNN training |
 | `tools/train_tp_cls.py` | Train/retrain the binary CNN confirmer |
 | `tools/eval_tp_cls.py` | Evaluate CNN on the held-out val split |
 | `tools/eval_tp_cls_full.py` | Evaluate CNN across all labeled data |
+| `tools/synth_teleport_v2.py` | Synthesise new TP training images (requires `recordings/` from repo) |
 
 ---
 
@@ -130,26 +133,56 @@ Every time a teleport is confirmed, the minimap frame is saved to `tp_detections
 pip install ultralytics torch torchvision opencv-python matplotlib pyyaml
 ```
 
+All scripts in `cp3/tools/` resolve paths relative to their own location — no hardcoded paths, no need to run from a specific working directory.
+
 ---
 
-## Evaluating the YOLO detector
+## Running the evaluations
 
-Place validation images in `cp3/vallabels/images/` and labels in `cp3/vallabels/labels/` (YOLO format, 5-class), then:
+All commands can be run from anywhere:
 
 ```
-python cp3/eval.py
-```
+# CP2 vs CP3 YOLO comparison table (requires CP2 model in repo's runs/detect/)
+python cp3/tools/eval_yolo_compare.py
 
-Outputs `cp3/eval.png` — per-class Precision / Recall / F1 / mAP50.
+# Regenerate the eval_compare.png chart (no models needed — uses hardcoded results)
+python cp3/tools/plot_yolo_compare.py
+
+# CNN confirmer — val split only
+python cp3/tools/eval_tp_cls.py
+
+# CNN confirmer — all labeled data
+python cp3/tools/eval_tp_cls_full.py
+```
 
 ---
 
 ## Retraining the CNN confirmer
 
 ```
-python tools/extract_tp_crops.py   # rebuild dataset_tp_cls/ from session_teleport labels
-python tools/train_tp_cls.py       # train → runs/classify/tp_confirm_cls/weights/best.pt
-python tools/eval_tp_cls.py        # check val metrics
+# 1. Rebuild the crop dataset from session_teleport labels
+python cp3/tools/extract_tp_crops.py
+
+# 2. Train
+python cp3/tools/train_tp_cls.py
+
+# 3. Evaluate
+python cp3/tools/eval_tp_cls.py
 ```
 
-Copy the new `best.pt` over `cp3/tp_confirm_cls.pt` to deploy.
+After training, copy the output weights into cp3:
+```
+copy runs\classify\tp_confirm_cls\weights\best.pt cp3\tp_confirm_cls.pt
+```
+
+---
+
+## Synthesising new training images
+
+Requires the `recordings/20260705_004828/` folder from the full repo (not included in cp3):
+
+```
+python cp3/tools/synth_teleport_v2.py
+```
+
+Output images and labels are written directly into `cp3/session_teleport/`.

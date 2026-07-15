@@ -15,9 +15,10 @@ torch.load = _p
 import cv2
 from pathlib import Path
 
-IMG_DIR   = Path("session_teleport/images")
-LBL_DIR   = Path("session_teleport/labels")
-WEIGHTS   = Path("runs/classify/tp_confirm_cls/weights/best.pt")
+_CP3      = Path(__file__).resolve().parent.parent
+IMG_DIR   = _CP3 / "session_teleport/images"
+LBL_DIR   = _CP3 / "session_teleport/labels"
+WEIGHTS   = _CP3 / "tp_confirm_cls.pt"
 CROP_SZ   = 64
 PAD_FRAC  = 0.3
 THRESHOLD = 0.55

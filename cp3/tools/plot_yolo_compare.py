@@ -63,6 +63,6 @@ for ax, metric, c2, c3 in zip(axes, metrics, colors_cp2, colors_cp3):
     ax.axvspan(tp_idx - 0.45, tp_idx + 0.45, color="yellow", alpha=0.08, zorder=0)
 
 fig.tight_layout()
-out = Path("cp3/eval_compare.png")
+out = Path(__file__).resolve().parent.parent / "eval_compare.png"
 fig.savefig(out, dpi=150, bbox_inches="tight")
 print(f"Saved → {out}")

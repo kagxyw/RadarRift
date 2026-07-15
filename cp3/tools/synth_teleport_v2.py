@@ -20,10 +20,12 @@ torch.load = _p
 random.seed(7)
 np.random.seed(7)
 
-ROOT    = Path(".")
-IMG_DIR = ROOT / "session_teleport/images"
-LBL_DIR = ROOT / "session_teleport/labels"
-BG_DIR  = ROOT / "recordings/20260705_004828"
+_CP3    = Path(__file__).resolve().parent.parent
+_REPO   = _CP3.parent   # repo root — needed for recordings/ which is not in cp3
+
+IMG_DIR = _CP3 / "session_teleport/images"
+LBL_DIR = _CP3 / "session_teleport/labels"
+BG_DIR  = _REPO / "recordings/20260705_004828"   # background frames (not in cp3)
 OUT_IMG = IMG_DIR
 OUT_LBL = LBL_DIR
 

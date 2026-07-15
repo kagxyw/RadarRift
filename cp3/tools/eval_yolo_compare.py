@@ -15,13 +15,16 @@ torch.load = _p
 from pathlib import Path
 import numpy as np
 
+_CP3    = Path(__file__).resolve().parent.parent
+_ROOT   = _CP3.parent   # repo root (for CP2 model which lives outside cp3)
+
 CLASSES = ["ally", "enemy", "teleport", "recall", "champion_icon"]
-VAL_DIR = Path("session_teleport")
+VAL_DIR = _CP3 / "session_teleport"
 
 # Build a tiny eval yaml pointing at session_teleport (train=val — only val matters)
-YAML_PATH = Path("_tmp_eval.yaml")
+YAML_PATH = _CP3 / "_tmp_eval.yaml"
 yaml.dump({
-    "path":  str(VAL_DIR.resolve()),
+    "path":  str(VAL_DIR),
     "train": "images",
     "val":   "images",
     "nc":    len(CLASSES),
@@ -29,8 +32,8 @@ yaml.dump({
 }, open(YAML_PATH, "w"))
 
 MODELS = {
-    "CP2 radarrift_final4":  "runs/detect/radarrift_final4/weights/best.pt",
-    "CP3 continue_Teleport": "runs/detect/continue_Teleport/weights/best.pt",
+    "CP2 radarrift_final4":  str(_ROOT / "runs/detect/radarrift_final4/weights/best.pt"),
+    "CP3 continue_Teleport": str(_CP3 / "best.pt"),
 }
 
 if __name__ == "__main__":
@@ -47,7 +50,7 @@ if __name__ == "__main__":
         m = model.val(data=str(YAML_PATH), imgsz=320, conf=0.25, iou=0.5, verbose=False)
         results[label] = m
 
-    YAML_PATH.unlink(missing_ok=True)
+    Path(YAML_PATH).unlink(missing_ok=True)
 
     for label, m in results.items():
         p  = np.array(m.box.p)

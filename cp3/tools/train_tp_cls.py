@@ -15,7 +15,7 @@ if __name__ == "__main__":
     from ultralytics import YOLO
     from pathlib import Path
 
-    OUT_ROOT = Path("dataset_tp_cls")
+    OUT_ROOT = Path(__file__).resolve().parent.parent / "dataset_tp_cls"
 
     model = YOLO("yolo11n-cls.pt")
     model.train(
@@ -29,4 +29,5 @@ if __name__ == "__main__":
         name    = "tp_confirm_cls",
         exist_ok= True,
     )
-    print("Done. Best weights:", "runs/classify/tp_confirm_cls/weights/best.pt")
+    out_weights = OUT_ROOT.parent / "runs" / "classify" / "tp_confirm_cls" / "weights" / "best.pt"
+    print(f"Done. Copy best weights to cp3/tp_confirm_cls.pt:\n  {out_weights}")

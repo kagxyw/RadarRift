@@ -15,8 +15,9 @@ from pathlib import Path
 import cv2
 
 THRESHOLD = 0.55
-VAL_DIR   = Path("dataset_tp_cls/val")
-WEIGHTS   = Path("runs/classify/tp_confirm_cls/weights/best.pt")
+_CP3      = Path(__file__).resolve().parent.parent
+VAL_DIR   = _CP3 / "dataset_tp_cls/val"
+WEIGHTS   = _CP3 / "tp_confirm_cls.pt"
 
 if __name__ == "__main__":
     from ultralytics import YOLO
