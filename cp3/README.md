@@ -185,10 +185,12 @@ copy runs\classify\tp_confirm_cls\weights\best.pt cp3\tp_confirm_cls.pt
 
 ## Synthesising new training images
 
-Requires the `recordings/20260705_004828/` folder from the full repo (not included in cp3):
+The model was trained on a limited number of real teleport frames. To improve robustness to different TP circle sizes, `synth_teleport_v2.py` copy-pastes real teleport swirl crops from `session_teleport/` onto clean minimap backgrounds at randomised scales, generating additional labeled images without any manual annotation.
+
+**Requirements:** a folder of raw minimap recording frames to use as backgrounds. By default the script expects `recordings/20260705_004828/` relative to the repo root. To use a different folder, edit the `BG_DIR` variable at the top of the script.
 
 ```
 python cp3/tools/synth_teleport_v2.py
 ```
 
-Output images and labels are written directly into `cp3/session_teleport/`.
+Synthetic images and their label files are written directly into `cp3/session_teleport/images/` and `cp3/session_teleport/labels/`. Re-run training afterwards to incorporate them.
