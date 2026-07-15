@@ -150,11 +150,9 @@ All scripts in `cp3/tools/` resolve paths relative to their own location — no 
 All commands can be run from anywhere:
 
 ```
-# CP2 vs CP3 YOLO comparison table (requires CP2 model in repo's runs/detect/)
+# CP2 vs CP3 YOLO comparison — prints table and saves eval_compare.png
+# Requires CP2 model at runs/detect/radarrift_final4/weights/best.pt
 python cp3/tools/eval_yolo_compare.py
-
-# Regenerate the eval_compare.png chart (no models needed — uses hardcoded results)
-python cp3/tools/plot_yolo_compare.py
 
 # CNN confirmer — val split only
 python cp3/tools/eval_tp_cls.py
