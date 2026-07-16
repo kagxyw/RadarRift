@@ -49,6 +49,7 @@ from champions import (
 from constants import LANE_ROLES, LANE_ROLE_LABELS
 from constants import BG, FG, DIM, ALLY, ENE, ACT, ASSETS_DIR, _POS_FILE, _ROSTER_FILE
 from overlay_qt import QtOverlay
+from directional_alert_overlay import DirectionalAlertOverlay
 from select_minimap import (
     auto_minimap_region,
     default_persisted_settings_path,
@@ -612,6 +613,7 @@ class App(AppWindow):
 
         # overlay — QApplication already running from main.py
         self._overlay = QtOverlay()
+        self._directional_alert = DirectionalAlertOverlay()
 
         # connect cross-thread signals → main-thread slots
         self._sig_status.connect(self._set_status)
@@ -1961,6 +1963,24 @@ class App(AppWindow):
                         if not self._enemy_allowed_for_radius_alert(key, roster):
                             continue
                         if t0 - self._alert_exit_time.get(key, 0.0) >= cooldown:
+                            # Directional screen alert: point from the player's
+                            # minimap position to this enemy's persisted last-seen
+                            # position. Prefer the live minimap crop for the icon;
+                            # the cached roster icon remains available off-map.
+                            enemy_state = library._state.get(key)
+                            if enemy_state and enemy_state.pos:
+                                lx, ly = enemy_state.pos
+                                enemy = next(
+                                    (r for r in results if r["key"] == key), None)
+                                crop = None
+                                if enemy is not None:
+                                    x1, y1, x2, y2 = enemy["box"]
+                                    crop = arr[y1:y2, x1:x2]
+                                if crop is None or not crop.size:
+                                    crop = library.icon_imgs.get(key)
+                                if crop is not None and crop.size:
+                                    self._directional_alert.show_enemy(
+                                        crop, (lx - px, ly - py))
                             threading.Thread(
                                 target=self._play_alert,
                                 args=(key,),
@@ -2621,6 +2641,7 @@ class App(AppWindow):
         if self.capture:
             self.capture.close()
         self._overlay.stop()
+        self._directional_alert.stop()
         event.accept()
 
     def run(self) -> None:
