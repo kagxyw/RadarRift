@@ -49,7 +49,6 @@ from champions import (
 from constants import LANE_ROLES, LANE_ROLE_LABELS
 from constants import BG, FG, DIM, ALLY, ENE, ACT, ASSETS_DIR, _POS_FILE, _ROSTER_FILE
 from overlay_qt import QtOverlay
-from directional_alert_overlay import DirectionalAlertOverlay
 from select_minimap import (
     auto_minimap_region,
     default_persisted_settings_path,
@@ -613,7 +612,7 @@ class App(AppWindow):
 
         # overlay — QApplication already running from main.py
         self._overlay = QtOverlay()
-        self._directional_alert = DirectionalAlertOverlay()
+        self._directional_indicator_feature = None
 
         # connect cross-thread signals → main-thread slots
         self._sig_status.connect(self._set_status)
@@ -665,6 +664,14 @@ class App(AppWindow):
         threading.Thread(target=self._prewarm_splash_model, daemon=True).start()
         threading.Thread(target=self._game_end_monitor_loop, daemon=True).start()
         self._start_watcher()
+        try:
+            from directional_indicator.feature import DirectionalIndicatorFeature
+
+            self._directional_indicator_feature = (
+                DirectionalIndicatorFeature.create(self)
+            )
+        except Exception:
+            self._directional_indicator_feature = None
 
         qa = QApplication.instance()
         if qa is not None:
@@ -1843,6 +1850,8 @@ class App(AppWindow):
         self._cancel_tracking_start = True
         self.running = False
         self._overlay.stop()
+        if self._directional_indicator_feature is not None:
+            self._directional_indicator_feature.hide()
         self._sync_run_button_state()
         self._set_status("Stopped.", "stop")
 
@@ -1952,8 +1961,10 @@ class App(AppWindow):
                     px, py   = pst.pos
                     cooldown = self._cooldown
                     now_in: set[str] = set()
+                    enemy_results: dict[str, dict] = {}
                     for r in results:
                         if r["team"] == "enemy":
+                            enemy_results[r["key"]] = r
                             ex, ey = r["location"]
                             if ((ex - px)**2 + (ey - py)**2)**0.5 <= self.alert_radius:
                                 now_in.add(r["key"])
@@ -1963,29 +1974,25 @@ class App(AppWindow):
                         if not self._enemy_allowed_for_radius_alert(key, roster):
                             continue
                         if t0 - self._alert_exit_time.get(key, 0.0) >= cooldown:
-                            # Directional screen alert: point from the player's
-                            # minimap position to this enemy's persisted last-seen
-                            # position. Prefer the live minimap crop for the icon;
-                            # the cached roster icon remains available off-map.
-                            enemy_state = library._state.get(key)
-                            if enemy_state and enemy_state.pos:
-                                lx, ly = enemy_state.pos
-                                enemy = next(
-                                    (r for r in results if r["key"] == key), None)
-                                crop = None
-                                if enemy is not None:
-                                    x1, y1, x2, y2 = enemy["box"]
-                                    crop = arr[y1:y2, x1:x2]
-                                if crop is None or not crop.size:
-                                    crop = library.icon_imgs.get(key)
-                                if crop is not None and crop.size:
-                                    self._directional_alert.show_enemy(
-                                        crop, (lx - px, ly - py))
                             threading.Thread(
                                 target=self._play_alert,
                                 args=(key,),
                                 daemon=True,
                             ).start()
+                            try:
+                                feature = self._directional_indicator_feature
+                                enemy_result = enemy_results.get(key)
+                                capture = self.capture
+                                if feature and enemy_result and capture:
+                                    feature.notify_ping(
+                                        player_position=(px, py),
+                                        enemy_position=enemy_result["location"],
+                                        minimap_frame=arr,
+                                        bounding_box=enemy_result.get("box"),
+                                        minimap_capture_region=tuple(capture.region),
+                                    )
+                            except Exception:
+                                pass
                     self._enemies_in_radius = now_in
 
             cap      = self._fps_cap
@@ -2641,7 +2648,9 @@ class App(AppWindow):
         if self.capture:
             self.capture.close()
         self._overlay.stop()
-        self._directional_alert.stop()
+        if self._directional_indicator_feature is not None:
+            self._directional_indicator_feature.shutdown()
+            self._directional_indicator_feature = None
         event.accept()
 
     def run(self) -> None:

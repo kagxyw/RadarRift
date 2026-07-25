@@ -24,7 +24,6 @@ ROOT       = Path(__file__).parent
 DATA_YAML  = ROOT / "dataset_champion" / "dataset.yaml"
 WEIGHTS    = ROOT / "runs" / "detect" / "radarrift_champion" / "weights" / "best.pt"
 BASE_MODEL = ROOT / "cache" / "minimap_yolo11n.pt"
-CP2_MODEL  = ROOT / "cp2" / "best.pt"
 
 
 def _device() -> str:
@@ -84,8 +83,7 @@ def train(epochs: int = 80, imgsz: int = 320, batch: int = 16,
 
 def load_model(weights: str | Path | None = None) -> YOLO:
     """Load the champion icon detector for use by the tracker."""
-    path = Path(weights) if weights else next(
-        (p for p in (WEIGHTS, BASE_MODEL, CP2_MODEL) if p.exists()), BASE_MODEL)
+    path = Path(weights) if weights else (WEIGHTS if WEIGHTS.exists() else BASE_MODEL)
     dev  = _device()
     model = YOLO(str(path))
     dummy = np.zeros((320, 320, 3), dtype=np.uint8)
@@ -115,15 +113,10 @@ def infer(
     for r in results:
         for box in r.boxes:
             cid  = int(box.cls[0])
-            class_name = name_table.get(cid, "champion_icon")
-            # cp2/best.pt also detects recall and teleport effects. They are
-            # not champion portraits and must not enter identity matching.
-            if class_name not in {"ally", "enemy", "champion_icon"}:
-                continue
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
             detections.append({
                 "class_id":   cid,
-                "class_name": class_name,
+                "class_name": name_table.get(cid, "champion_icon"),
                 "conf":       float(box.conf[0]),
                 "box":        (x1, y1, x2, y2),
             })
