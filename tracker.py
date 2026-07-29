@@ -6,15 +6,16 @@ Identification pipeline per detected box
 Stage 1 — HSV histogram shortlist  (vectorised, ~0.1 ms / frame)
     Bhattacharyya coefficient:  BC(a,b) = Σ √(aᵢ·bᵢ)  ∈ [0,1]
     Vectorised as √ref_mat @ √crop_mat.T  (n_champ × n_box matrix multiply).
-    Scale- and crop-invariant.  Narrows each detection down to top-K
-    candidates from the 10-champion roster.
+    Histograms are computed inside a circular mask (icons are round; the
+    square crop's terrain corners are ignored). Narrows each detection
+    down to top-K candidates from the 10-champion roster.
 
 Stage 2 — ORB verification  (precomputed refs, ~1 ms / box / candidate)
-    Reference ORB keypoints+descriptors are computed ONCE at library init.
-    Per-frame: compute query ORB on each YOLO crop, then BFMatcher against
-    the K shortlisted references.  ORB is scale- and rotation-invariant,
-    so it distinguishes champions that share a similar colour scheme
-    (e.g. Shen vs Sejuani — both dark/blue-grey).
+    Reference ORB keypoints+descriptors are computed ONCE at library init,
+    also under the circular mask. Per-frame: compute query ORB on each
+    YOLO crop, then BFMatcher against the K shortlisted references.
+    ORB is scale- and rotation-invariant, so it distinguishes champions
+    that share a similar colour scheme (e.g. Shen vs Sejuani).
 
 Combined score = BC  +  λ·ORB_norm  +  position bonus
     ORB_norm = min(orb_matches / _ORB_SCALE, 1.0)
@@ -52,7 +53,7 @@ _POS_W_LOW      = 0.25   # position bonus weight when last pos was low-confidenc
 
 # Debounce / trail
 _TRAIL_LEN        = 3    # number of confirmed positions kept for direction arrow
-_MIN_CONFIRM      = 5    # consecutive matches needed before committing a position
+_MIN_CONFIRM      = 3    # consecutive matches before commit (~0.6s at 5 FPS)
 _CLOSE_PX         = 18   # movement ≤ this many px is accepted immediately (same champ)
 # Stage 1 — HSV histogram (Bhattacharyya)
 _BC_THRESHOLD   = 0.5   # reject if BC below this; skip ORB/assignment for weaker pairs
@@ -137,10 +138,23 @@ def location_in_viewport(
     px: int,
     py: int,
     viewport: tuple[int, int, int, int] | None,
+    *,
+    shrink: float = 0.80,
 ) -> bool:
+    """True if (px, py) is inside the viewport, shrunk toward its centre.
+
+    ``shrink`` (default 0.80) contracts the box by 20% so icons sitting on the
+    white outline fringe are not treated as on-screen.
+    """
     if viewport is None:
         return False
     x1, y1, x2, y2 = viewport
+    if shrink < 1.0:
+        cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+        hw = (x2 - x1) * 0.5 * shrink
+        hh = (y2 - y1) * 0.5 * shrink
+        x1, x2 = cx - hw, cx + hw
+        y1, y2 = cy - hh, cy + hh
     return x1 <= px <= x2 and y1 <= py <= y2
 
 
@@ -222,11 +236,38 @@ def fetch_icon(key: str) -> Image.Image:
     return Image.new("RGB", (64, 64), (80, 80, 80))
 
 
+# ── Circular mask (minimap icons are round; square crops include terrain) ─────
+
+# Shrink slightly inside the inscribed circle so the fog/border ring around the
+# champion portrait does not dominate the histogram or ORB keypoints.
+_CIRCLE_MASK_FRAC = 0.92
+_circle_mask_cache: dict[tuple[int, int], np.ndarray] = {}
+
+
+def _circular_mask(h: int, w: int,
+                   frac: float = _CIRCLE_MASK_FRAC) -> np.ndarray:
+    """Uint8 mask with a filled circle centred on an h×w image."""
+    key = (h, w)
+    cached = _circle_mask_cache.get(key)
+    if cached is not None:
+        return cached
+    mask = np.zeros((h, w), dtype=np.uint8)
+    if h > 0 and w > 0:
+        cx, cy = w // 2, h // 2
+        radius = max(1, int(min(cx, cy) * frac))
+        cv2.circle(mask, (cx, cy), radius, 255, -1, lineType=cv2.LINE_AA)
+    _circle_mask_cache[key] = mask
+    return mask
+
+
 # ── HSV histogram helpers ─────────────────────────────────────────────────────
 
 def _img_hsv_hist(img: Image.Image) -> np.ndarray:
     """
     L1-normalised 3-D HSV histogram (1024-dim float32).
+
+    Only pixels inside a circular mask are counted — matching the round
+    minimap icon and ignoring terrain/fog in the square crop corners.
 
     L1 (sum-to-1) normalisation ensures the Bhattacharyya coefficient
         BC(a, b) = Σ √(aᵢ · bᵢ)
@@ -234,14 +275,15 @@ def _img_hsv_hist(img: Image.Image) -> np.ndarray:
     """
     bgr = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    h   = cv2.calcHist([hsv], [0, 1, 2], None, _HIST_BINS, _HIST_RANGES)
+    mask = _circular_mask(hsv.shape[0], hsv.shape[1])
+    h   = cv2.calcHist([hsv], [0, 1, 2], mask, _HIST_BINS, _HIST_RANGES)
     cv2.normalize(h, h, norm_type=cv2.NORM_L1)
     return h.flatten().astype(np.float32)
 
 
 def _crop_hsv_hist(frame_rgb: np.ndarray,
                    box:       tuple[int, int, int, int]) -> np.ndarray:
-    """HSV histogram from a bounding-box crop of the minimap frame."""
+    """HSV histogram from a circular-masked bounding-box crop."""
     x1, y1, x2, y2 = box
     crop = frame_rgb[y1:y2, x1:x2]
     if crop.size == 0:
@@ -275,9 +317,12 @@ def _to_orb_gray(img: Image.Image) -> np.ndarray:
     )
 
 
-def _img_orb_desc(gray: np.ndarray) -> np.ndarray | None:
-    """Compute ORB descriptors for an already-resized grayscale array."""
-    _, des = _get_orb().detectAndCompute(gray, None)
+def _img_orb_desc(gray: np.ndarray,
+                  mask: np.ndarray | None = None) -> np.ndarray | None:
+    """Compute ORB descriptors inside a circular mask (default: inscribed)."""
+    if mask is None:
+        mask = _circular_mask(gray.shape[0], gray.shape[1])
+    _, des = _get_orb().detectAndCompute(gray, mask)
     return des   # None if no keypoints
 
 
@@ -598,8 +643,8 @@ def track_frame(
     from tp_confirm import get_confirmer as _get_confirmer, PAD_FRAC as _TP_PAD
     frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-    # Low-conf pass for TP/recall (catches faint animations)
-    _TP_CLASSES = {"teleport", "recall"}
+    # Low-conf pass for TP (catches faint animations)
+    _TP_CLASSES = {"teleport"}  # "recall" disabled
     all_dets = _infer(_get_yolo(model), frame_bgr, conf=min(tp_conf, conf))
 
     _confirmer = _get_confirmer()
@@ -665,6 +710,7 @@ def track_frame(
                               (_ORB_SIZE, _ORB_SIZE),
                               interpolation=cv2.INTER_LINEAR)
             gray_u8 = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY) if gray.ndim == 3 else gray
+            # Same circular mask as reference icons — ignore terrain corners.
             query_descs.append(_img_orb_desc(gray_u8))
 
     combined  = bc_mat.copy()
@@ -768,6 +814,17 @@ def track_frame(
     for r in results:
         cx, cy = r["location"]
         r["in_viewport"] = location_in_viewport(cx, cy, viewport)
+
+    # Append a meta entry so callers can read the viewport box without
+    # changing the return type.  Consumers should skip team == "_meta".
+    if viewport is not None:
+        vx1, vy1, vx2, vy2 = viewport
+        results.append({
+            "team":     "_meta",
+            "key":      "_viewport",
+            "location": ((vx1 + vx2) // 2, (vy1 + vy2) // 2),
+            "box":      viewport,
+        })
 
     # # ── Debug snapshot (every _DEBUG_INTERVAL frames) ────────────────────────
     # _debug_frame_counter += 1

@@ -13,11 +13,12 @@ from PIL import Image
 
 # ── backend selection ─────────────────────────────────────────────────────────
 
-try:
-    import dxcam as _dxcam
-    _DXCAM_AVAILABLE = True
-except ImportError:
-    _DXCAM_AVAILABLE = False
+# try:
+#     import dxcam as _dxcam
+#     _DXCAM_AVAILABLE = True
+# except ImportError:
+#     _DXCAM_AVAILABLE = False
+_DXCAM_AVAILABLE = False
 
 try:
     import mss as _mss
@@ -25,10 +26,10 @@ try:
 except ImportError:
     _MSS_AVAILABLE = False
 
-if not _DXCAM_AVAILABLE and not _MSS_AVAILABLE:
-    raise ImportError("Neither dxcam nor mss is installed. Run: pip install dxcam")
+if not _MSS_AVAILABLE:
+    raise ImportError("mss is not installed. Run: pip install mss")
 
-_BACKEND = "dxcam" if _DXCAM_AVAILABLE else "mss"
+_BACKEND = "mss"
 
 
 # ── capture backends ──────────────────────────────────────────────────────────
@@ -85,13 +86,40 @@ class _DxcamCapture:
         self._last = frame
         return Image.fromarray(frame)
 
+    def grab_fresh(self, timeout_s: float = 0.05) -> Image.Image:
+        """
+        Discard any cached frame and block until dxcam returns a genuinely
+        new frame (non-None) or timeout_s elapses.
+
+        Use this after toggling WDA_EXCLUDEFROMCAPTURE so the grab always
+        reflects the updated composited desktop rather than a stale buffer.
+        """
+        import time
+        with self._lock:
+            self._last = None   # invalidate cache
+        deadline = time.perf_counter() + timeout_s
+        while time.perf_counter() < deadline:
+            with self._lock:
+                frame = self._cam.grab(region=self._dx_region)
+            if frame is not None:
+                self._last = frame
+                return Image.fromarray(frame)
+            time.sleep(0.003)
+        # Timeout — return a blank frame rather than stale data
+        left, top, w, h = self.region
+        return Image.new("RGB", (w, h), (0, 0, 0))
+
     def close(self) -> None:
         pass
 
 
 class _MssCapture:
     """
-    Fallback frame grabber using mss (DXGI Desktop Duplication via Python).
+    Frame grabber using mss (GDI/BitBlt).
+
+    GDI BitBlt respects WDA_EXCLUDEFROMCAPTURE, so windows hidden from capture
+    appear as black/absent.  Used as the YOLO inference grabber when the overlay
+    must be excluded from the captured frame.
 
     mss stores Win32 DC handles in thread-local storage, so each thread that
     calls grab() gets its own mss context created on first use.
@@ -151,5 +179,23 @@ class Capture:
     def grab(self) -> Image.Image:
         return self._backend.grab()
 
+    def grab_fresh(self, timeout_s: float = 0.05) -> Image.Image:
+        """Block until a new frame is available (invalidates the cache first)."""
+        if hasattr(self._backend, "grab_fresh"):
+            return self._backend.grab_fresh(timeout_s)
+        return self._backend.grab()
+
+    def grab_gdi(self) -> Image.Image:
+        """
+        Grab via GDI/BitBlt (mss).  Unlike dxcam, GDI BitBlt respects
+        WDA_EXCLUDEFROMCAPTURE, so set the overlay hidden before calling this
+        to get a clean frame without the overlay markers.
+        """
+        if not hasattr(self, "_mss_backend"):
+            self._mss_backend = _MssCapture(self.region)
+        return self._mss_backend.grab()
+
     def close(self) -> None:
+        if hasattr(self, "_mss_backend"):
+            self._mss_backend.close()
         self._backend.close()

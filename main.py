@@ -26,7 +26,9 @@ _qt_app = QApplication(sys.argv)
 
 # from tools.startup_check import ensure_ready
 from app import App
+from win_lol import launch_league_on_startup
 
 if __name__ == "__main__":
+    launch_league_on_startup()
     # if ensure_ready():
     App().run()

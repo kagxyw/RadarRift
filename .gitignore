@@ -17,6 +17,18 @@ env/
 *.pth
 *.onnx
 
+# Keep live / deliverable weights tracked (force-add path exceptions)
+!cp2/best.pt
+!cp2/best.onnx
+!cp3/best.pt
+!cp3/tp_confirm_cls.pt
+!runs/detect/continue_Teleport/weights/best.pt
+!runs/classify/tp_exp_aug_faint/weights/best.pt
+!runs/classify/tp_confirm_cls/weights/best.pt
+!runs/classify/tp_confirm_cls/weights/best.onnx
+!cache/champion_yolo11n.onnx
+!cache/splash_detection.onnx
+
 # App-local state (positions, roster)
 .radarrift_pos.json
 pos.json
@@ -24,12 +36,41 @@ radarrift_pos.json
 
 # Downloaded game cache (icons, matrices) — run rebuild_cache.py
 cache/
+# but keep the ONNX models the app/bundle loads (see exceptions above)
+!cache/
+cache/*
+!cache/champion_yolo11n.onnx
+!cache/splash_detection.onnx
 
 # Spec temp copy
 cache_bundle_tmp/
+tp_bundle_tmp/
 
 # Training / Ultralytics
 runs/
+# keep active detector + TP-CNN checkpoints
+!runs/
+runs/*
+!runs/detect/
+runs/detect/*
+!runs/detect/continue_Teleport/
+runs/detect/continue_Teleport/*
+!runs/detect/continue_Teleport/weights/
+runs/detect/continue_Teleport/weights/*
+!runs/detect/continue_Teleport/weights/best.pt
+!runs/classify/
+runs/classify/*
+!runs/classify/tp_exp_aug_faint/
+runs/classify/tp_exp_aug_faint/*
+!runs/classify/tp_exp_aug_faint/weights/
+runs/classify/tp_exp_aug_faint/weights/*
+!runs/classify/tp_exp_aug_faint/weights/best.pt
+!runs/classify/tp_confirm_cls/
+runs/classify/tp_confirm_cls/*
+!runs/classify/tp_confirm_cls/weights/
+runs/classify/tp_confirm_cls/weights/*
+!runs/classify/tp_confirm_cls/weights/best.pt
+!runs/classify/tp_confirm_cls/weights/best.onnx
 wandb/
 
 # annotation_tool.py default layout (session/images, session/labels)

@@ -36,9 +36,38 @@ def _root() -> Path:
 
 
 def _pick_minimap_pt(root: Path, cache: Path) -> Path | None:
+    # Prefer whatever yolo_champion.py declares as WEIGHTS (single source of truth)
+    try:
+        import importlib.util, sys as _sys
+        spec = importlib.util.spec_from_file_location(
+            "yolo_champion", root / "yolo_champion.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        # Don't execute the module fully — just grab the WEIGHTS constant
+        src = (root / "yolo_champion.py").read_text(encoding="utf-8")
+        for line in src.splitlines():
+            line = line.strip()
+            if line.startswith("WEIGHTS") and "=" in line and "runs" in line:
+                # e.g. WEIGHTS = ROOT / "runs" / "detect" / "continue_Teleport" / "weights" / "best.pt"
+                parts = [p.strip().strip('"').strip("'") for p in line.split("/")]
+                # Reconstruct relative to root
+                rel_parts = []
+                capture = False
+                for p in parts:
+                    if "runs" in p:
+                        capture = True
+                    if capture:
+                        rel_parts.append(p)
+                if rel_parts:
+                    candidate = root / Path(*rel_parts)
+                    if candidate.is_file():
+                        print(f"Using WEIGHTS from yolo_champion.py: {candidate}")
+                        return candidate
+    except Exception as e:
+        print(f"Could not read WEIGHTS from yolo_champion.py: {e}")
+
     for p in (
         cache / "champion_yolo11n.pt",
-        root / "runs" / "detect" / "radarrift_champion" / "weights" / "best.pt",
         cache / "minimap_yolo11n.pt",
         root / "yolo11n.pt",
     ):

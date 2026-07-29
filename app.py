@@ -584,8 +584,8 @@ class App(AppWindow):
         self._enemy_off_map_since: dict[str, float] = {}
         self._alert_muted_enemies: set[str]       = set()
         self._tps_in_radius: set[tuple] = set()
-        self._tp_last_alert: float = 0.0   # global last TP alert time
-        self._TP_COOLDOWN = 3.0
+        self._tp_last_alert: float = 0.0
+        self._TP_COOLDOWN = 6.0
         self._match_track_start_t: float | None = None
 
         # thread-safe setting caches
@@ -618,6 +618,7 @@ class App(AppWindow):
 
         # overlay — QApplication already running from main.py
         self._overlay = QtOverlay()
+        self._directional_indicator_feature = None
 
         # connect cross-thread signals → main-thread slots
         self._sig_status.connect(self._set_status)
@@ -669,6 +670,27 @@ class App(AppWindow):
         threading.Thread(target=self._prewarm_splash_model, daemon=True).start()
         threading.Thread(target=self._game_end_monitor_loop, daemon=True).start()
         self._start_watcher()
+        try:
+            from directional_indicator.feature import DirectionalIndicatorFeature
+
+            self._directional_indicator_feature = (
+                DirectionalIndicatorFeature.create(
+                    self,
+                    size_scale=self.dir_indicator_scale_spin.value(),
+                    edge_style=(
+                        self.dir_indicator_style_combo.currentData()
+                        or "circular"
+                    ),
+                )
+            )
+            self.dir_indicator_scale_spin.valueChanged.connect(
+                self._on_dir_indicator_scale_changed
+            )
+            self.dir_indicator_style_combo.currentIndexChanged.connect(
+                self._on_dir_indicator_style_changed
+            )
+        except Exception:
+            self._directional_indicator_feature = None
 
         qa = QApplication.instance()
         if qa is not None:
@@ -909,7 +931,6 @@ class App(AppWindow):
 
     def _role_filter_active(self) -> bool:
         from constants import ROLE_ALERT_FILTER_SEC
-
         elapsed = self._match_elapsed_sec()
         if elapsed is None:
             return False
@@ -926,6 +947,25 @@ class App(AppWindow):
             if not should_alert_for_role(roster.player.role, enemy.role):
                 return False
         return True
+
+    def _on_dir_indicator_scale_changed(self, val: float) -> None:
+        feature = self._directional_indicator_feature
+        if feature is not None:
+            try:
+                feature.set_size_scale(float(val))
+            except Exception:
+                pass
+        self._save_pos()
+
+    def _on_dir_indicator_style_changed(self, _index: int = 0) -> None:
+        feature = self._directional_indicator_feature
+        style = self.dir_indicator_style_combo.currentData() or "circular"
+        if feature is not None:
+            try:
+                feature.set_edge_style(str(style))
+            except Exception:
+                pass
+        self._save_pos()
 
     def _on_volume_change(self, val=None) -> None:
         try:
@@ -1206,9 +1246,11 @@ class App(AppWindow):
         if sel.result:
             x, y, w, h = sel.result
             self._death_region = sel.result
+            if self._death_capture:
+                self._death_capture.close()
+            self._death_capture = Capture(sel.result)
             self.death_region_lbl.setText(
                 f"{w}×{h}  at ({x}, {y})  [manual]")
-            self._sync_death_capture()
             self._save_pos()
 
     def _auto_death_region(self) -> None:
@@ -1224,9 +1266,9 @@ class App(AppWindow):
         return 0
 
     def _default_alert_radius_px(self) -> int:
-        """Default danger ring: 20% of minimap edge length."""
+        """Default danger ring: 10% of minimap edge length."""
         edge = self._minimap_edge_px()
-        return max(1, int(edge * 0.20)) if edge > 0 else 0
+        return max(1, int(edge * 0.10)) if edge > 0 else 0
 
     def _apply_default_alert_radius(self) -> None:
         if self._alert_radius_explicit and self.alert_radius == 0:
@@ -1487,6 +1529,8 @@ class App(AppWindow):
                             pst_dbg, "suppress_marker_until_map", False)
                     )
                     for r in dbg_res:
+                        if r.get("team") == "_meta":
+                            continue
                         if hide_pl and r.get("key") == pkey_dbg:
                             continue
                         cx_r = int(r["location"][0] * scale)
@@ -1874,6 +1918,8 @@ class App(AppWindow):
         self._cancel_tracking_start = True
         self.running = False
         self._overlay.stop()
+        if self._directional_indicator_feature is not None:
+            self._directional_indicator_feature.hide()
         self._sync_run_button_state()
         self._set_status("Stopped.", "stop")
         try:
@@ -1894,7 +1940,7 @@ class App(AppWindow):
 
         region   = self.capture.region
         interval = float(max(0.1, self.record_interval_spin.value()))
-        fps      = 1.0 / interval   # stored in metadata only; no VideoWriter
+        fps      = 1.0 / interval
         x, y, w, h = region
 
         stamp   = _dt.now().strftime("%Y%m%d_%H%M%S")
@@ -1902,9 +1948,9 @@ class App(AppWindow):
         out_dir.mkdir(parents=True, exist_ok=True)
         cp_path = out_dir / "checkpoints.json"
 
-        monitor  = {"left": x, "top": y, "width": w, "height": h}
+        monitor    = {"left": x, "top": y, "width": w, "height": h}
         checkpoints: list[dict] = []
-        frame_idx = 0
+        frame_idx  = 0
 
         f11_prev = bool(ctypes.windll.user32.GetAsyncKeyState(0x7A) & 0x8000)
 
@@ -1914,8 +1960,7 @@ class App(AppWindow):
                 while self.running:
                     now = time.perf_counter()
 
-                    f11 = bool(
-                        ctypes.windll.user32.GetAsyncKeyState(0x7A) & 0x8000)
+                    f11 = bool(ctypes.windll.user32.GetAsyncKeyState(0x7A) & 0x8000)
                     if f11 and not f11_prev:
                         checkpoints.append({
                             "frame":     frame_idx,
@@ -1991,6 +2036,7 @@ class App(AppWindow):
 
     def _infer_loop(self) -> None:
         from tracker import track_frame
+        _death_t: float = 0.0
         while self.running:
             t0      = time.perf_counter()
             roster  = self.roster
@@ -2029,17 +2075,10 @@ class App(AppWindow):
             self._infer_results = results
             self._infer_seq    += 1
 
-            # # update preview-dialog snapshot every 10 frames (cheap copy)
-            # if self._infer_seq % 10 == 0:
-            #     self._dbg_minimap_rgb = arr.copy()
-            #     self._dbg_results     = list(results)
-
-            # Enemy death strip (scan_death_panel) disabled — player portrait only
-            # when the tracker loses the player on the minimap.
             player_key = library.roster.player.key
             pst = library._state.get(player_key)
 
-            def _player_on_map(res: list[dict]) -> bool:
+            def _player_on_map(res) -> bool:
                 return any(
                     r.get("key") == player_key and not r.get("inferred_from")
                     for r in res
@@ -2059,18 +2098,6 @@ class App(AppWindow):
                         player_frame_rgb=player_frame,
                     )
                     self._infer_results = results
-                    # if (player_frame is not None and player_frame.size > 0
-                    #         and self._infer_seq % 2 == 0):
-                    #     dc = self._death_capture
-                    #     if dc is not None:
-                    #         strip = np.array(dc.grab())
-                    #         if strip.size > 0:
-                    #             from death_panel import (
-                    #                 save_player_death_portrait_debug,
-                    #             )
-                    #             sh, sw = strip.shape[:2]
-                    #             save_player_death_portrait_debug(
-                    #                 strip, player_frame, (0, 0, sw, sh))
                 except Exception:
                     pass
 
@@ -2087,31 +2114,40 @@ class App(AppWindow):
 
             # alert proximity
             player_on_map = _player_on_map(results)
-            suppress = bool(
-                pst and getattr(pst, "suppress_marker_until_map", False)
-            )
+            suppress = bool(pst and getattr(pst, "suppress_marker_until_map", False))
             if roster and self.alert_radius > 0 and player_on_map and not suppress:
                 self._update_alert_mutes_for_on_map_time(roster, t0)
-                pst = library._state.get(player_key)
                 if pst and pst.pos:
                     px, py   = pst.pos
                     cooldown = self._cooldown
+                    # Collect enemy results and viewport centre from meta entry.
+                    enemy_results: dict[str, dict] = {}
+                    viewport_centre: tuple[int, int] | None = None
+                    for r in results:
+                        if r.get("team") == "_meta" and r.get("key") == "_viewport":
+                            viewport_centre = r["location"]
+                            continue
+                        if r.get("team") == "enemy":
+                            enemy_results[r["key"]] = r
+
+                    # Enemies inside the white camera box are already on screen;
+                    # reset their exit time so the cooldown absorbs the sighting.
                     in_viewport = {
-                        r["key"] for r in results
-                        if r.get("team") == "enemy" and r.get("in_viewport")
+                        key for key, r in enemy_results.items()
+                        if r.get("in_viewport")
                     }
-                    # In the white camera box = already seen; start cooldown, no audio.
                     for key in in_viewport:
                         if self._enemy_allowed_for_radius_alert(key, roster):
                             self._alert_exit_time[key] = t0
+
                     now_in: set[str] = set()
-                    for r in results:
-                        if r["team"] == "enemy":
-                            ex, ey = r["location"]
-                            if ((ex - px)**2 + (ey - py)**2)**0.5 <= self.alert_radius:
-                                now_in.add(r["key"])
+                    for key, r in enemy_results.items():
+                        ex, ey = r["location"]
+                        if ((ex - px)**2 + (ey - py)**2)**0.5 <= self.alert_radius:
+                            now_in.add(key)
                     for key in (self._enemies_in_radius - now_in):
                         self._alert_exit_time[key] = t0
+
                     for key in (now_in - self._enemies_in_radius):
                         if not self._enemy_allowed_for_radius_alert(key, roster):
                             continue
@@ -2121,9 +2157,33 @@ class App(AppWindow):
                                 args=(key,),
                                 daemon=True,
                             ).start()
+                            try:
+                                feature = self._directional_indicator_feature
+                                enemy_result = enemy_results.get(key)
+                                capture = self.capture
+                                if feature and enemy_result and capture:
+                                    champ_icon: np.ndarray | None = None
+                                    try:
+                                        lib = self._library
+                                        if lib is not None:
+                                            champ_icon = lib.icon_imgs.get(key)
+                                    except Exception:
+                                        pass
+                                    feature.notify_ping(
+                                        player_position=viewport_centre or (px, py),
+                                        enemy_position=enemy_result["location"],
+                                        minimap_frame=arr,
+                                        bounding_box=enemy_result.get("box"),
+                                        minimap_capture_region=tuple(capture.region),
+                                        champion_icon=champ_icon,
+                                        indicator_id=key,
+                                    )
+                            except Exception:
+                                pass
+
                     self._enemies_in_radius = now_in
 
-            # ── TP alert — fires for any teleport anywhere on the map ─────────
+            # ── TP alert — fires for any teleport detected anywhere on map ─────
             if not suppress:
                 tp_seen = any(
                     r.get("team") == "tp_event" and r.get("class_name") == "teleport"
@@ -2133,7 +2193,7 @@ class App(AppWindow):
                     self._tps_in_radius = {r["location"] for r in results
                                            if r.get("team") == "tp_event"
                                            and r.get("class_name") == "teleport"}
-                    # Save frame for debugging / CNN data collection
+                    # Save frame for debugging / CNN data collection.
                     try:
                         import cv2 as _cv2
                         _tp_debug_dir = Path(__file__).resolve().parent / "tp_detections"
@@ -2220,12 +2280,6 @@ class App(AppWindow):
 
     # ── alert sound ────────────────────────────────────────────────────────────
 
-    def _play_tp_alert(self) -> None:
-        vol = self._volume
-        if not play_tp_alert(vol):
-            if self.alert_sound and Path(self.alert_sound).exists():
-                play_file(self.alert_sound, vol)
-
     def _play_alert(self, enemy_key: str | None = None) -> None:
         vol = self._volume
         if self.alert_mode == "name":
@@ -2243,6 +2297,12 @@ class App(AppWindow):
             return
         if self.alert_sound and Path(self.alert_sound).exists():
             play_file(self.alert_sound, vol)
+
+    def _play_tp_alert(self) -> None:
+        vol = self._volume
+        if not play_tp_alert(vol):
+            if self.alert_sound and Path(self.alert_sound).exists():
+                play_file(self.alert_sound, vol)
 
     # ── auto-watcher ───────────────────────────────────────────────────────────
 
@@ -2285,10 +2345,7 @@ class App(AppWindow):
                 try:
                     from backend import load_splash_model
                     splash_model = self._splash_model = load_splash_model()
-                except Exception as _e:
-                    import traceback
-                    print(f"[watcher] Failed to load splash model: {_e}")
-                    traceback.print_exc()
+                except Exception:
                     splash_model = None
                     self._splash_model = None
 
@@ -2346,10 +2403,7 @@ class App(AppWindow):
                             else:
                                 splash_boxes = result
                             n_cards = len(splash_boxes)
-                        except Exception as _e:
-                            import traceback
-                            print(f"[watcher] detect_cards error: {_e}")
-                            traceback.print_exc()
+                        except Exception:
                             n_cards = 0
 
                     consecutive   = (consecutive + 1) if n_cards == 10 else 0
@@ -2455,28 +2509,10 @@ class App(AppWindow):
         if self._player_death_portrait_region is not None:
             self._player_death_capture = Capture(
                 self._player_death_portrait_region)
-        # self._save_player_death_portrait_debug_snapshot()
 
     def _save_player_death_portrait_debug_snapshot(self) -> None:
         """Grab death strip + player portrait and write debug PNGs."""
         return  # debug_crops disabled
-        # dc = self._death_capture
-        # pc = self._player_death_capture
-        # if dc is None or pc is None:
-        #     return
-        # try:
-        #     import numpy as np
-        #     from death_panel import save_player_death_portrait_debug
-        #
-        #     strip = np.array(dc.grab())
-        #     player = np.array(pc.grab())
-        #     if strip.size == 0 or player.size == 0:
-        #         return
-        #     h, w = strip.shape[:2]
-        #     save_player_death_portrait_debug(
-        #         strip, player, (0, 0, w, h))
-        # except Exception:
-        #     pass
 
     def _game_end_monitor_loop(self) -> None:
         """While tracking is active, detect when League of Legends.exe exits and
@@ -2691,6 +2727,10 @@ class App(AppWindow):
                 "arrow_alpha":        self.arrow_alpha_spin.value(),
                 "dot_size":           self.dot_size_spin.value(),
                 "ring_thickness":     self.ring_thickness_spin.value(),
+                "dir_indicator_scale": self.dir_indicator_scale_spin.value(),
+                "dir_indicator_style": (
+                    self.dir_indicator_style_combo.currentData() or "circular"
+                ),
                 "capture_hidden":     self.capture_hidden_cb.isChecked(),
                 "record_minimap":     self.record_cb.isChecked(),
                 "record_interval":    self.record_interval_spin.value(),
@@ -2773,6 +2813,18 @@ class App(AppWindow):
                         int(data.get(key, default)))
                 except Exception:
                     pass
+            try:
+                self.dir_indicator_scale_spin.setValue(
+                    float(data.get("dir_indicator_scale", 1.0)))
+            except Exception:
+                pass
+            try:
+                style = str(data.get("dir_indicator_style", "circular"))
+                idx = self.dir_indicator_style_combo.findData(style)
+                if idx >= 0:
+                    self.dir_indicator_style_combo.setCurrentIndex(idx)
+            except Exception:
+                pass
 
             fps = str(data.get("fps", "5"))
             if fps in {"1", "3", "5", "10", "15", "Unlimited"}:
@@ -2801,9 +2853,7 @@ class App(AppWindow):
                 dx, dy, dw, dh = dr
                 self.death_region_lbl.setText(
                     f"{dw}×{dh}  at ({dx}, {dy})  [manual]")
-            if self.capture is not None and (
-                death_region or region
-            ):
+            if self.capture is not None and (death_region or region):
                 self._sync_death_capture()
 
             pdr = data.get("player_death_portrait_region")
@@ -2851,6 +2901,9 @@ class App(AppWindow):
         if self.capture:
             self.capture.close()
         self._overlay.stop()
+        if self._directional_indicator_feature is not None:
+            self._directional_indicator_feature.shutdown()
+            self._directional_indicator_feature = None
         event.accept()
 
     def run(self) -> None:

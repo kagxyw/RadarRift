@@ -16,6 +16,25 @@ from pathlib import Path
 from constants import minimap_size
 
 _RIOT_PERSISTED_TAIL = Path("Riot Games") / "League of Legends" / "Config" / "PersistedSettings.json"
+_RIOT_LEAGUE_TAIL = Path("Riot Games") / "League of Legends"
+_RIOT_CLIENT_TAIL = Path("Riot Games") / "Riot Client"
+_LEAGUE_CLIENT_EXE = "LeagueClient.exe"
+_RIOT_CLIENT_SERVICES_EXE = "RiotClientServices.exe"
+
+
+def _pick_preferred_riot_path(hits: list[Path]) -> Path | None:
+    if not hits:
+        return None
+    if len(hits) == 1:
+        return hits[0]
+    sd = os.environ.get("SystemDrive", "C:").strip().rstrip("\\/")
+    if not sd.endswith(":"):
+        sd += ":"
+    pref = sd.upper()
+    for p in hits:
+        if p.drive.upper() == pref:
+            return p
+    return sorted(hits, key=lambda x: x.as_posix())[0]
 
 
 def _find_persisted_settings_windows() -> Path | None:
@@ -30,18 +49,57 @@ def _find_persisted_settings_windows() -> Path | None:
         candidate = root / _RIOT_PERSISTED_TAIL
         if candidate.is_file():
             hits.append(candidate)
-    if not hits:
+    return _pick_preferred_riot_path(hits)
+
+
+def _find_league_install_windows() -> Path | None:
+    hits: list[Path] = []
+    for letter in string.ascii_uppercase:
+        root = Path(f"{letter}:/")
+        try:
+            if not root.exists():
+                continue
+        except OSError:
+            continue
+        candidate = root / _RIOT_LEAGUE_TAIL
+        if (candidate / _LEAGUE_CLIENT_EXE).is_file():
+            hits.append(candidate)
+    return _pick_preferred_riot_path(hits)
+
+
+def default_league_install_path() -> Path | None:
+    """League install folder containing LeagueClient.exe (e.g. C:/Riot Games/League of Legends)."""
+    if sys.platform == "win32":
+        found = _find_league_install_windows()
+        if found is not None:
+            return found
+        fallback = Path(r"C:\Riot Games\League of Legends")
+        if (fallback / _LEAGUE_CLIENT_EXE).is_file():
+            return fallback
+    return None
+
+
+def default_riot_client_services_path() -> Path | None:
+    """RiotClientServices.exe (launches League from the tray client)."""
+    if sys.platform != "win32":
         return None
-    if len(hits) == 1:
-        return hits[0]
-    sd = os.environ.get("SystemDrive", "C:").strip().rstrip("\\/")
-    if not sd.endswith(":"):
-        sd += ":"
-    pref = sd.upper()
-    for p in hits:
-        if p.drive.upper() == pref:
-            return p
-    return sorted(hits, key=lambda x: x.as_posix())[0]
+    install = default_league_install_path()
+    if install is not None:
+        sibling = install.parent / "Riot Client" / _RIOT_CLIENT_SERVICES_EXE
+        if sibling.is_file():
+            return sibling
+    for letter in string.ascii_uppercase:
+        root = Path(f"{letter}:/")
+        try:
+            if not root.exists():
+                continue
+        except OSError:
+            continue
+        candidate = root / _RIOT_CLIENT_TAIL / _RIOT_CLIENT_SERVICES_EXE
+        if candidate.is_file():
+            return candidate
+    fallback = Path(r"C:\Riot Games\Riot Client") / _RIOT_CLIENT_SERVICES_EXE
+    return fallback if fallback.is_file() else None
 
 
 def default_persisted_settings_path() -> Path | None:

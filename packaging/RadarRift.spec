@@ -88,6 +88,23 @@ if os.path.isdir(_tts_out):
         [f for f in os.listdir(_tts_out) if f.lower().endswith(".mp3")]))
 else:
     print("WARNING: tts_out/ not found — Read name alerts will need MP3s beside the exe.")
+_tp_cls_onnx = os.path.join(_ROOT, "runs", "classify",
+                             "tp_confirm_cls", "weights", "best.onnx")
+if os.path.isfile(_tp_cls_onnx):
+    # Rename to tp_confirm_cls.onnx so tp_confirm.py finds it next to the exe.
+    # Stage it OUTSIDE cache_bundle_tmp — that whole tree is bundled into
+    # _internal/cache/, so staging here would ship the model a second time.
+    import shutil as _shutil
+    _tp_tmp = os.path.join(_ROOT, "tp_bundle_tmp")
+    os.makedirs(_tp_tmp, exist_ok=True)
+    _tp_cls_renamed = os.path.join(_tp_tmp, "tp_confirm_cls.onnx")
+    _shutil.copy2(_tp_cls_onnx, _tp_cls_renamed)
+    datas.append((_tp_cls_renamed, "."))
+    print("Bundling tp_confirm_cls.onnx (%.1f MB)"
+          % (os.path.getsize(_tp_cls_onnx) / 1e6,))
+else:
+    print("WARNING: tp_confirm_cls.onnx not found — TP CNN disabled in exe")
+
 datas += [
     (os.path.join(_assets, "屏幕截图 2026-03-07 060822.png"), "."),
     (os.path.join(_assets, "arrow_up.svg"), "."),
@@ -230,6 +247,9 @@ coll = COLLECT(
     overwrite_spec=True,
 )
 
-# Clean up the temporary cache copy used during bundling
+# Clean up the temporary copies used during bundling
 if os.path.exists(_cache_tmp):
     shutil.rmtree(_cache_tmp)
+_tp_tmp_dir = os.path.join(_ROOT, "tp_bundle_tmp")
+if os.path.exists(_tp_tmp_dir):
+    shutil.rmtree(_tp_tmp_dir)

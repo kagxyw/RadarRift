@@ -211,7 +211,7 @@ def export_all(force: bool = False) -> dict[str, bool]:
         if not pt.exists():
             results[pt.name] = False
             continue
-        results[pt.name] = export_to_onnx(pt, onnx)
+        results[pt.name] = export_to_onnx(pt, onnx, imgsz=imgsz, force=force)
     return results
 
 
@@ -263,7 +263,8 @@ def _nms(boxes: np.ndarray, scores: np.ndarray,
 
 
 def _postprocess(output: np.ndarray, scale: float, pad_x: int, pad_y: int,
-                 orig_h: int, orig_w: int, conf_thr: float
+                 orig_h: int, orig_w: int, conf_thr: float,
+                 iou_thr: float = 0.45
                  ) -> list[tuple[int, int, int, int, float, int]]:
     """
     Decode YOLO11 ONNX output → list of (x1,y1,x2,y2,conf,cls).
@@ -295,7 +296,7 @@ def _postprocess(output: np.ndarray, scale: float, pad_x: int, pad_y: int,
     y2 = np.clip((y2 - pad_y) / scale, 0, orig_h)
 
     boxes_xy = np.stack([x1, y1, x2, y2], axis=1)
-    keep     = _nms(boxes_xy, conf)
+    keep     = _nms(boxes_xy, conf, iou_thr=iou_thr)
 
     return [(int(x1[i]), int(y1[i]), int(x2[i]), int(y2[i]),
              float(conf[i]), int(cls_id[i])) for i in keep]
@@ -326,7 +327,7 @@ class OnnxDetector:
         dummy = np.zeros((1, 3, imgsz, imgsz), dtype=np.float32)
         self._sess.run(None, {self._iname: dummy})
 
-    def detect(self, bgr: np.ndarray
+    def detect(self, bgr: np.ndarray, iou: float = 0.45
                ) -> list[tuple[int, int, int, int, float, int]]:
         """
         Run detection on a BGR frame.
@@ -335,7 +336,8 @@ class OnnxDetector:
         h, w = bgr.shape[:2]
         tensor, scale, px, py = _preprocess(bgr, self._imgsz)
         outputs = self._sess.run(None, {self._iname: tensor})
-        return _postprocess(outputs[0], scale, px, py, h, w, self._conf)
+        return _postprocess(outputs[0], scale, px, py, h, w, self._conf,
+                            iou_thr=iou)
 
     @property
     def conf(self) -> float:
@@ -392,7 +394,7 @@ def infer(model: OnnxDetector, frame: np.ndarray,
     """
     model.conf  = conf
     model._imgsz = imgsz
-    raw = model.detect(frame)
+    raw = model.detect(frame, iou=iou)
     return [
         {
             "class_id":   cls_id,

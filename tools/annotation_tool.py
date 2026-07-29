@@ -39,14 +39,23 @@ from PIL import Image, ImageTk
 
 _ROOT = Path(__file__).resolve().parent.parent
 
+# Parse --labels PATH before standard arg handling
+_labels_override: Path | None = None
+_args = _sys.argv[1:]
+if "--labels" in _args:
+    _li = _args.index("--labels")
+    _labels_override = Path(_args[_li + 1])
+    _args = _args[:_li] + _args[_li + 2:]
+    _sys.argv = [_sys.argv[0]] + _args
+
 if len(_sys.argv) > 1:
     _split = Path(_sys.argv[1])
     IMG_DIR = _split
-    LABEL_DIR = _split.parent.parent / "labels" / _split.name
+    LABEL_DIR = _labels_override if _labels_override else (_split.parent.parent / "labels" / _split.name)
 else:
     SESSION_DIR = _ROOT / "session"
     IMG_DIR = SESSION_DIR / "images"
-    LABEL_DIR = SESSION_DIR / "labels"
+    LABEL_DIR = _labels_override if _labels_override else SESSION_DIR / "labels"
 
 LABEL_DIR.mkdir(parents=True, exist_ok=True)
 IMG_DIR.mkdir(parents=True, exist_ok=True)
@@ -55,6 +64,11 @@ _DEFAULT_CLASSES = ["ally", "enemy", "teleport", "recall", "champion_icon"]
 
 # Classes that automatically also emit a champion_icon co-label when drawn
 _CHAMPION_CO_LABEL_CLASSES = {"ally", "enemy"}
+
+# --no-co-label flag disables auto champion_icon emission
+_AUTO_CO_LABEL = "--no-co-label" not in _sys.argv
+if not _AUTO_CO_LABEL:
+    _sys.argv.remove("--no-co-label")
 
 
 def _load_classes_from_yaml(split_path: Path):
@@ -97,7 +111,7 @@ COLORS = {i: _PALETTE[i % len(_PALETTE)] for i in range(len(CLASSES))}
 
 # Canvas grows to fit each image (aspect ratio kept); capped by screen minus UI chrome.
 _CANVAS_MARGIN_X = 80
-_CANVAS_MARGIN_Y = 280
+_CANVAS_MARGIN_Y = 460   # team row + effect row + nav + hint + status bar + padding
 _CANVAS_MIN_W, _CANVAS_MIN_H = 320, 240
 
 HELP_BODY = """QUICK START
@@ -185,7 +199,9 @@ class AnnotationTool:
 
         self.images = sorted(IMG_DIR.glob("*.png")) + sorted(IMG_DIR.glob("*.jpg"))
         self.idx = 0
-        self.boxes = []
+        self.boxes = []        # [cls, cx, cy, bw, bh]  — YOLO fields only
+        self._groups: list[int] = []   # parallel list: group id per box (-1 = loaded)
+        self._group_ctr = 0    # incremented each draw; all boxes in one draw share same id
         self.sel = -1
         # cur_team: 0=ally, 1=enemy  (always required)
         # cur_effect: None | 2=teleport | 3=recall  (optional)
@@ -321,9 +337,16 @@ class AnnotationTool:
             btn.pack(side="left", padx=(0, 8))
             self._team_btns.append(btn)
 
-        # champion_icon is always emitted — show as static badge
-        tk.Label(team_frame, text="+ champion_icon  (always)",
-                 bg=BG, fg="#44ffee", font=("Segoe UI", 9, "italic")).pack(side="left", padx=(16, 0))
+        # champion_icon co-label toggle
+        self._co_label_var = tk.BooleanVar(value=_AUTO_CO_LABEL)
+        co_cb = tk.Checkbutton(
+            team_frame, text="+ champion_icon  (auto)",
+            variable=self._co_label_var,
+            bg=BG, fg="#44ffee", selectcolor="#1a1a2e",
+            activebackground=BG, activeforeground="#44ffee",
+            font=("Segoe UI", 9, "italic"),
+        )
+        co_cb.pack(side="left", padx=(16, 0))
 
         # ── Row 2: Effect (optional, mutually exclusive) ──────────────────────
         eff_frame = tk.Frame(self.root, bg=BG)
@@ -547,7 +570,8 @@ class AnnotationTool:
             auto = _ROOT / "dataset_minimap" / "labels" / "train" / f"{p.stem}.txt"
             if auto.exists():
                 shutil.copy(auto, lbl_path)
-        self.boxes = load_labels(lbl_path)
+        self.boxes   = load_labels(lbl_path)
+        self._groups = [-1] * len(self.boxes)   # loaded boxes have no group
         self.sel = -1
 
         self.lbl_file.config(text=p.name)
@@ -719,34 +743,51 @@ class AnnotationTool:
 
         champ_idx = _class_index("champion_icon")
         to_add = []
-        if champ_idx is not None:
-            to_add.append([champ_idx, cx, cy, bw, bh])          # champion_icon always
+        if champ_idx is not None and self._co_label_var.get():
+            to_add.append([champ_idx, cx, cy, bw, bh])          # champion_icon (optional)
         to_add.append([self.cur_team, cx, cy, bw, bh])           # ally or enemy
         if self.cur_effect is not None:
             to_add.append([self.cur_effect, cx, cy, bw, bh])     # teleport or recall
 
+        gid = self._group_ctr
+        self._group_ctr += 1
         self.boxes.extend(to_add)
+        self._groups.extend([gid] * len(to_add))
         self._last_draw_count = len(to_add)
         self.sel = len(self.boxes) - 1
+        self._redraw()
+
+    def _delete_group(self, idx: int):
+        """Remove all boxes that share the same group as box[idx]."""
+        if idx < 0 or idx >= len(self.boxes):
+            return
+        gid = self._groups[idx]
+        if gid == -1:
+            # loaded box with no group — delete just that one
+            self.boxes.pop(idx)
+            self._groups.pop(idx)
+        else:
+            keep_b = [b for b, g in zip(self.boxes, self._groups) if g != gid]
+            keep_g = [g for g in self._groups if g != gid]
+            self.boxes   = keep_b
+            self._groups = keep_g
+        self.sel = -1
         self._redraw()
 
     def _on_right_click(self, ev):
         hit = self._box_at(ev.x, ev.y)
         if hit >= 0:
-            self.boxes.pop(hit)
-            self.sel = -1
-            self._redraw()
+            self._delete_group(hit)
 
     def _delete_selected(self):
         if 0 <= self.sel < len(self.boxes):
-            self.boxes.pop(self.sel)
-            self.sel = -1
-            self._redraw()
+            self._delete_group(self.sel)
 
     def _undo(self):
         n = max(1, self._last_draw_count)
         if self.boxes:
             del self.boxes[-n:]
+            del self._groups[-n:]
             self._last_draw_count = 0
             self.sel = -1
             self._redraw()

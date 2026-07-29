@@ -27,8 +27,7 @@ ACT  = "#a6e3a1"   # green
 
 # ── Persistent state files ────────────────────────────────────────────────────
 
-_POS_FILE    = _ROOT / ".radarrift_pos.json"
-_ROSTER_FILE = _ROOT / ".radarrift_roster.json"
+_POS_FILE = _ROOT / ".radarrift_pos.json"
 
 # LoL lane roles (for radius-alert filtering + manual roster column order)
 LANE_ROLES = ("top", "jungle", "mid", "adc", "support")
@@ -52,3 +51,7 @@ def normalize_lane_role(role: str) -> str:
 
 # After mute-on-map triggers, enemy must stay off minimap this long before alerts return
 ALERT_UNMUTE_OFF_MAP_SEC = 10.0
+
+# Radius alerts: suppress same-role / bot-lane pair only this long after tracking starts.
+# ~14 min ≈ typical end of laning; 12 min = stricter, 15–18 min = looser.
+ROLE_ALERT_FILTER_SEC = 14 * 60

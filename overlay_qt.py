@@ -285,19 +285,47 @@ class _QtOverlayWidget(QWidget):
         # ── active detection dots ─────────────────────────────────────────────
         if show_overlay and dot_size > 0:
             p.setPen(Qt.PenStyle.NoPen)
+            drawn_player = False
+            player_key = library.roster.player.key if library is not None else None
+            pst = (library._state.get(player_key) if player_key else None)
+            hide_player = bool(
+                pst and getattr(pst, "suppress_marker_until_map", False)
+            )
             for r in results:
+                # Viewport centre meta entry — never draw a marker for it.
+                if r.get("team") == "_meta":
+                    continue
+                if hide_player and r.get("key") == player_key:
+                    continue
                 cx, cy = r["location"]
                 col = _team_color(r.get("team", ""))
                 p.setBrush(col)
                 p.drawEllipse(cx - dot_size, cy - dot_size,
                               dot_size * 2, dot_size * 2)
+                if player_key is not None and r.get("key") == player_key:
+                    drawn_player = True
+            if library is not None and not drawn_player:
+                if (pst and pst.pos and not pst.dead and not hide_player
+                        and getattr(pst, "infer_stack_key", None)):
+                    cx, cy = pst.pos
+                    p.setBrush(_team_color("player"))
+                    p.drawEllipse(cx - dot_size, cy - dot_size,
+                                  dot_size * 2, dot_size * 2)
 
         # ── alert radius ring ─────────────────────────────────────────────────
         if show_overlay and alert_radius > 0 and ring_thick > 0 and library is not None:
             player_key    = library.roster.player.key
             pst           = library._state.get(player_key)
-            player_on_map = any(r.get("key") == player_key for r in results)
-            if pst and pst.pos and player_on_map:
+            hide_player   = bool(
+                pst and getattr(pst, "suppress_marker_until_map", False)
+            )
+            player_on_map = any(
+                r.get("key") == player_key and not r.get("inferred_from")
+                for r in results
+            )
+            if (pst and pst.pos and not hide_player and (
+                player_on_map or getattr(pst, "infer_stack_key", None)
+            )):
                 px, py = pst.pos
                 enemy_inside = any(
                     r.get("team") == "enemy"

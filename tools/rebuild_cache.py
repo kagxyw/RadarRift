@@ -9,8 +9,9 @@ Step 1 — skin portraits (default: wiki.leagueoflegends.com)
         Uses leagueoflegends.fandom.com instead.
 
 Step 2 — download_icons()
-    Minimap square icons from wiki.leagueoflegends.com (Category:Champion_squares,
-    *OriginalSquare.png) → cache/icons/{ChampionKey}.png
+    Minimap circle icons from wiki.leagueoflegends.com Category:Champion_circles
+    (paginated root file list only — does not enter “!” subcategories), *OriginalCircle.png
+    → cache/icons/{ChampionKey}.png
     (Uses cache/champion_registry.json for display-name → key mapping.)
 
 Step 3 — build_matrix()
@@ -55,7 +56,8 @@ _LOLG_WIKI_API   = "https://wiki.leagueoflegends.com/api.php"
 _WIKI_UA         = "RadarRiftCacheBot/1.0 (local cache rebuild; educational)"
 _FANDOM_CATEGORY = "Category:Champion_loading_screens"
 _LOLG_LOADING_CATEGORY = "Category:Champion_loading_screens"
-_LOLG_ICON_CATEGORY = "Category:Champion_squares"
+_LOLG_ICON_CATEGORY = "Category:Champion_circles"
+_ICON_FILE_SUFFIX = " OriginalCircle.png"
 
 # Subcategories under Category:Champion_loading_screens to NOT recurse into
 # (misc / legacy / Wild Rift / unused — not SR champion loading art we need).
@@ -253,6 +255,15 @@ def _mw_collect_loading_jpg_titles_recursive(
     return sorted(file_titles)
 
 
+def _file_title_ends_with_suffix(file_title: str, suffix: str) -> bool:
+    """Match File:Ahri OriginalCircle.png against `` OriginalCircle.png``."""
+    if not file_title.startswith("File:"):
+        return False
+    compact = file_title[5:].replace(" ", "").lower()
+    want = suffix.replace(" ", "").lower()
+    return compact.endswith(want)
+
+
 def _mw_batch_image_urls(api_url: str, file_titles: list[str]) -> dict[str, str]:
     """Map full page title → direct image URL (latest revision). ~50 titles per query."""
     out: dict[str, str] = {}
@@ -285,31 +296,58 @@ def _wiki_file_title_to_cache_name(title: str) -> str:
     return name.replace(" ", "_")
 
 
-def _lol_wiki_list_original_square_titles() -> list[str]:
-    """All default minimap squares in Category:Champion_squares (excludes Arcane/TFT variants)."""
+def _wiki_list_category_file_titles(
+    api_url: str,
+    category: str,
+    suffix: str,
+    verbose: bool = False,
+) -> list[str]:
+    """
+    Paginate file members of a category (no subcategories).
+
+    For Champion_circles the wiki already lists circle PNGs on the root page;
+    “!” subcats (Old / Special / Unused / HD) are never entered.
+    """
     titles: list[str] = []
     continue_params: dict = {}
-    suffix = " OriginalSquare.png"
+    cmtitle = category.replace(" ", "_")
+    if not cmtitle.startswith("Category:"):
+        cmtitle = "Category:" + cmtitle
+    page = 0
     while True:
+        page += 1
         q: dict = {
             "action": "query",
             "list": "categorymembers",
-            "cmtitle": _LOLG_ICON_CATEGORY.replace(" ", "_"),
+            "cmtitle": cmtitle,
             "cmtype": "file",
             "cmlimit": "500",
         }
         q.update(continue_params)
-        data = _mw_get(_LOLG_WIKI_API, q)
+        data = _mw_get(api_url, q)
+        batch = 0
         for m in data.get("query", {}).get("categorymembers", []):
             t = m.get("title", "")
-            if t.startswith("File:") and t.endswith(suffix):
+            if _file_title_ends_with_suffix(t, suffix):
                 titles.append(t)
+                batch += 1
+        if verbose and page % 2 == 0:
+            print(f"  … page {page}, {len(titles)} {suffix.strip()} file(s) so far")
         cont = data.get("continue")
         if not cont:
             break
         continue_params = {k: v for k, v in cont.items() if k != "batchcomplete"}
         time.sleep(0.12)
     return titles
+
+
+def _lolg_list_original_circle_titles(verbose: bool = False) -> list[str]:
+    """OriginalCircle.png from paginated Category:Champion_circles file list only."""
+    if verbose:
+        print("  (root files only — skipping ! / Old / Special / Unused subcategories)")
+    return _wiki_list_category_file_titles(
+        _LOLG_WIKI_API, _LOLG_ICON_CATEGORY, _ICON_FILE_SUFFIX, verbose=verbose,
+    )
 
 
 def _champion_display_name_to_key(champ_data: dict) -> dict[str, str]:
@@ -537,16 +575,25 @@ def build_matrix(verbose: bool = True,
 
 # ── minimap icon pre-downloader ───────────────────────────────────────────────
 
+def _wiki_title_to_display_name(file_title: str, suffix: str) -> str:
+    """File:Miss Fortune OriginalCircle.png → Miss Fortune"""
+    name = file_title[5:] if file_title.startswith("File:") else file_title
+    if name.endswith(suffix):
+        name = name[: -len(suffix)]
+    return name.replace("_", " ").strip()
+
+
 def download_icons(
     verbose: bool = True,
     on_progress: callable | None = None,
     workers: int = 8,
 ) -> int:
     """
-    Download minimap square icons into cache/icons/{ChampionKey}.png.
+    Download minimap circle icons into cache/icons/{ChampionKey}.png.
 
-    Uses wiki.leagueoflegends.com Category:Champion_squares (*OriginalSquare.png)
-    via the MediaWiki API. Name→key mapping comes from cache/champion_registry.json.
+    Uses wiki.leagueoflegends.com Category:Champion_circles (paginated root files,
+    *OriginalCircle.png only; no “!” subcategories) via the MediaWiki API.
+    Name→key mapping comes from cache/champion_registry.json.
 
     on_progress(done, total) is called after each download attempt finishes.
     """
@@ -557,15 +604,16 @@ def download_icons(
     icon_dir.mkdir(parents=True, exist_ok=True)
     champ_data = _load_champion_data_for_icons()
 
-    # ── LoL Wiki (Weird Gloop) — default skin squares only ───────────────
     name_to_key = _champion_display_name_to_key(champ_data)
-    suffix = " OriginalSquare.png"
+    suffix = _ICON_FILE_SUFFIX
 
     if verbose:
-        print(f"Listing {_LOLG_ICON_CATEGORY} (*OriginalSquare.png) …")
-    titles = _lol_wiki_list_original_square_titles()
+        print(
+            f"Listing {_LOLG_ICON_CATEGORY} (*OriginalCircle.png) on wiki.leagueoflegends.com …",
+        )
+    titles = _lolg_list_original_circle_titles(verbose=verbose)
     if verbose:
-        print(f"  Found {len(titles)} default square file(s).")
+        print(f"  Found {len(titles)} OriginalCircle file(s).")
 
     if not titles:
         return 0
@@ -576,7 +624,7 @@ def download_icons(
 
     todo: list[tuple[str, str, Path]] = []
     for t in titles:
-        display_name = t[5 : -len(suffix)] if t.startswith("File:") else t[: -len(suffix)]
+        display_name = _wiki_title_to_display_name(t, suffix)
         key = name_to_key.get(display_name)
         if not key:
             continue
@@ -660,7 +708,10 @@ def main():
         download_skins_wiki(verbose=True)
     print()
     print("=== Step 2: download missing minimap icons ===")
-    print("(source: wiki.leagueoflegends.com — Category:Champion_squares)")
+    print(
+        "(source: wiki.leagueoflegends.com — Category:Champion_circles, "
+        "paginated root, *OriginalCircle.png only)",
+    )
     download_icons(verbose=True)
     print()
     print("=== Step 3: build NCC matrix + HSV hist index ===")

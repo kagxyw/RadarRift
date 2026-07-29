@@ -270,7 +270,39 @@ class AppWindow(QWidget):
             "Current minimap rectangle: width×height and top-left (x, y) in screen pixels.",
         )
 
+        rec_row = QWidget()
+        rl = QHBoxLayout(rec_row)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(6)
+
+        self.record_cb = QCheckBox("Record minimap")
+        self.record_cb.setChecked(False)
+        self.record_cb.stateChanged.connect(self._save_pos)
+        self.record_cb.setToolTip(
+            "When checked, record the minimap to recordings/ while tracking is active. "
+            "Press F11 in-game to mark a checkpoint."
+        )
+
+        self.record_interval_spin = QDoubleSpinBox()
+        self.record_interval_spin.setRange(0.1, 60.0)
+        self.record_interval_spin.setSingleStep(0.5)
+        self.record_interval_spin.setDecimals(1)
+        self.record_interval_spin.setValue(1.0)
+        self.record_interval_spin.setFixedWidth(65)
+        self.record_interval_spin.setToolTip(
+            "Seconds between captured frames. 0.1 = 10 fps, 1.0 = 1 fps, 5.0 = 1 frame every 5 s."
+        )
+        self.record_interval_spin.valueChanged.connect(self._save_pos)
+        _rec_fps_lbl = QLabel("s / frame")
+        _rec_fps_lbl.setStyleSheet(f"color: {DIM};")
+
+        rl.addWidget(self.record_cb)
+        rl.addStretch(1)
+        rl.addWidget(self.record_interval_spin)
+        rl.addWidget(_rec_fps_lbl)
+
         root.addWidget(cap_row)
+        root.addWidget(rec_row)
         root.addWidget(self.region_lbl)
 
         # Death strip UI (disabled — scanning commented out in app infer loop)
@@ -578,6 +610,36 @@ class AppWindow(QWidget):
         _g_ring.setToolTip(self.ring_thickness_spin.toolTip())
         grid.addWidget(_g_ring, 2, 5)
         grid.addWidget(self.ring_thickness_spin, 2, 6)
+
+        self.dir_indicator_scale_spin = QDoubleSpinBox()
+        self.dir_indicator_scale_spin.setRange(0.25, 4.0)
+        self.dir_indicator_scale_spin.setSingleStep(0.25)
+        self.dir_indicator_scale_spin.setDecimals(2)
+        self.dir_indicator_scale_spin.setValue(1.0)
+        self.dir_indicator_scale_spin.setFixedWidth(_SW + 10)
+        self.dir_indicator_scale_spin.setToolTip(
+            "Champion icon size for the directional indicator.\n"
+            "Does not change the orange/red alert arcs.\n"
+            "1.0 = default. Try 1.5–2.0 if the icon feels small."
+        )
+        _g_dir = QLabel("Icon size:")
+        _g_dir.setToolTip(self.dir_indicator_scale_spin.toolTip())
+        grid.addWidget(_g_dir, 3, 0)
+        grid.addWidget(self.dir_indicator_scale_spin, 3, 1)
+
+        self.dir_indicator_style_combo = QComboBox()
+        self.dir_indicator_style_combo.addItem("Circular", "circular")
+        self.dir_indicator_style_combo.addItem("Screen edge", "edge")
+        self.dir_indicator_style_combo.setFixedWidth(_SW + 40)
+        self.dir_indicator_style_combo.setToolTip(
+            "Orange/red alert stroke style.\n"
+            "Circular — inscribed ring (Valorant/Apex style).\n"
+            "Screen edge — hugs the actual display border."
+        )
+        _g_style = QLabel("Alert style:")
+        _g_style.setToolTip(self.dir_indicator_style_combo.toolTip())
+        grid.addWidget(_g_style, 3, 2)
+        grid.addWidget(self.dir_indicator_style_combo, 3, 3)
 
         grid_wrap = QWidget()
         grid_wrap.setLayout(grid)
