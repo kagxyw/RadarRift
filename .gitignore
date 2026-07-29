@@ -17,11 +17,11 @@ env/
 *.pth
 *.onnx
 
+# Milestone packages — local only, not on main
+cp2/
+cp3/
+
 # Keep live / deliverable weights tracked (force-add path exceptions)
-!cp2/best.pt
-!cp2/best.onnx
-!cp3/best.pt
-!cp3/tp_confirm_cls.pt
 !runs/detect/continue_Teleport/weights/best.pt
 !runs/classify/tp_exp_aug_faint/weights/best.pt
 !runs/classify/tp_confirm_cls/weights/best.pt
